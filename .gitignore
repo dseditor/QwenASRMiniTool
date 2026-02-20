@@ -1,0 +1,68 @@
+# ── Python ───────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.spec
+results/
+
+# ── 虛擬環境 ─────────────────────────────────────────
+venv/
+build_venv/
+.venv/
+env/
+
+# ── 模型檔案（下載後產生，體積大）──────────────────────
+ov_models/qwen3_asr_int8/
+ov_models/silero_vad*.onnx
+onnx_models/
+*.onnx
+*.bin
+*.xml
+
+# ── 允許特定 ov_models 檔案 ───────────────────────────
+!ov_models/mel_filters.npy
+
+# ── 自動產生的設定/快取檔 ────────────────────────────
+settings.json
+
+# ── 輸出檔案 ─────────────────────────────────────────
+subtitles/
+*.srt
+installer/
+
+# ── 所有 BAT 檔預設忽略，以下兩個除外 ───────────────────
+*.bat
+!build.bat
+!build_venv.bat
+
+# ── 開發/測試用腳本 ──────────────────────────────────
+test_*.py
+benchmark.py
+check_*.py
+export_onnx.*
+generate_srt.py
+merge_onnx.py
+cleanup_merged.py
+download_test_audio.py
+quantize_cpu.py
+REQ.txt
+setup.iss
+
+# ── 測試音檔 ─────────────────────────────────────────
+test_audio/
+*.wav
+*.mp3
+*.flac
+*.m4a
+
+# ── 其他 ─────────────────────────────────────────────
+.claude/
+*.jpg
+*.png
+*.log
+*.tmp

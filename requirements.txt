@@ -1,0 +1,22 @@
+# Qwen3 ASR MiniTool - 執行環境依賴
+# 安裝：pip install -r requirements.txt
+
+# GUI
+customtkinter>=5.2.0
+
+# 推理引擎
+openvino>=2024.0.0
+onnxruntime>=1.17.0
+
+# 音訊處理
+numpy>=1.24.0
+librosa>=0.10.0
+sounddevice>=0.4.6
+
+# 中文轉換（簡轉繁）
+opencc-python-reimplemented>=0.1.7
+
+# ──────────────────────────────────────────────────────
+# 以下僅開發時需要（用於重新產生 prompt_template.json）
+# pip install qwen-asr transformers
+# python generate_prompt_template.py

@@ -290,11 +290,13 @@ class ASREngine:
         language: str | None = None,
         context: str | None = None,
         diarize: bool = False,
+        n_speakers: int | None = None,
     ) -> Path | None:
         """音檔 → SRT，回傳 SRT 路徑。
-        language : 強制語系（如 "Chinese"），None 表示自動偵測
-        context  : 辨識提示（歌詞/關鍵字），放入 system message
-        diarize  : True 時用說話者分離取代 VAD，SRT 加說話者前綴
+        language   : 強制語系（如 "Chinese"），None 表示自動偵測
+        context    : 辨識提示（歌詞/關鍵字），放入 system message
+        diarize    : True 時用說話者分離取代 VAD，SRT 加說話者前綴
+        n_speakers : 指定說話者人數（None=自動偵測）
         """
         import librosa
         audio, _ = librosa.load(str(audio_path), sr=SAMPLE_RATE, mono=True)
@@ -303,7 +305,7 @@ class ASREngine:
         # groups_spk: [(g0_sec, g1_sec, audio_chunk, speaker_label | None), ...]
         use_diar = diarize and self.diar_engine is not None and self.diar_engine.ready
         if use_diar:
-            diar_segs = self.diar_engine.diarize(audio)
+            diar_segs = self.diar_engine.diarize(audio, n_speakers=n_speakers)
             if not diar_segs:
                 return None
             groups_spk = [
@@ -473,6 +475,7 @@ class App(ctk.CTk):
         self._selected_language: str | None  = None   # 目前選定的語系
         self._file_hint: str | None          = None   # 音檔轉字幕 hint
         self._file_diarize: bool             = False  # 說話者分離開關
+        self._file_n_speakers: int | None    = None   # 指定說話者人數（None=自動）
 
         self._build_ui()
         self._detect_ov_devices()
@@ -584,8 +587,19 @@ class App(ctk.CTk):
         self.diarize_chk = ctk.CTkCheckBox(
             row2, text="說話者分離", variable=self._diarize_var,
             font=FONT_BODY, state="disabled",
+            command=self._on_diarize_toggle,
         )
         self.diarize_chk.pack(side="left", padx=(20, 0))
+
+        ctk.CTkLabel(row2, text="人數：", font=FONT_BODY,
+                     text_color="#AAAAAA").pack(side="left", padx=(8, 2))
+        self.n_spk_combo = ctk.CTkComboBox(
+            row2,
+            values=["自動", "2", "3", "4", "5", "6", "7", "8"],
+            width=76, state="disabled", font=FONT_BODY,
+        )
+        self.n_spk_combo.set("自動")
+        self.n_spk_combo.pack(side="left")
 
         # 辨識提示（Hint / Context）
         hint_hdr = ctk.CTkFrame(parent, fg_color="transparent")
@@ -740,6 +754,13 @@ class App(ctk.CTk):
         ).pack(side="left")
 
     # ── 模型載入 ───────────────────────────────────────
+
+    # ── 說話者分離 UI 輔助 ───────────────────────────────────────────
+
+    def _on_diarize_toggle(self):
+        """說話者分離 checkbox 切換時，同步啟用／停用人數選擇器。"""
+        state = "readonly" if self._diarize_var.get() else "disabled"
+        self.n_spk_combo.configure(state=state)
 
     # ── Hint 輸入輔助 ─────────────────────────────────────────────────
 
@@ -1073,6 +1094,9 @@ class App(ctk.CTk):
         hint_text = self.hint_box.get("1.0", "end").strip()
         self._file_hint = hint_text if hint_text else None
         self._file_diarize = self._diarize_var.get()
+        n_spk_sel = self.n_spk_combo.get()
+        self._file_n_speakers = (int(n_spk_sel)
+                                  if n_spk_sel.isdigit() else None)
 
         self._converting = True
         self.convert_btn.configure(state="disabled", text="轉換中…")
@@ -1084,9 +1108,10 @@ class App(ctk.CTk):
         path = self._audio_file
 
         # 擷取語系、hint 與說話者分離（在主執行緒已取好，直接帶入 worker）
-        language = self._selected_language
-        context  = self._file_hint
-        diarize  = getattr(self, "_file_diarize", False)
+        language   = self._selected_language
+        context    = self._file_hint
+        diarize    = getattr(self, "_file_diarize", False)
+        n_speakers = getattr(self, "_file_n_speakers", None)
 
         def prog_cb(done, total, msg):
             pct = done / total if total > 0 else 0
@@ -1098,11 +1123,15 @@ class App(ctk.CTk):
             t0 = time.perf_counter()
             lang_info  = f"  語系：{language or '自動'}"
             hint_info  = f"  提示：{context[:30]}…" if context and len(context) > 30 else (f"  提示：{context}" if context else "")
-            diar_info  = "  [說話者分離]" if diarize else ""
+            if diarize:
+                n_str = str(n_speakers) if n_speakers else "自動"
+                diar_info = f"  [說話者分離，人數：{n_str}]"
+            else:
+                diar_info = ""
             self._file_log(f"開始處理：{path.name}{lang_info}{hint_info}{diar_info}")
             srt = self.engine.process_file(
                 path, progress_cb=prog_cb, language=language,
-                context=context, diarize=diarize,
+                context=context, diarize=diarize, n_speakers=n_speakers,
             )
             elapsed = time.perf_counter() - t0
 

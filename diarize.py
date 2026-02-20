@@ -7,15 +7,22 @@ diarize.py
   segmentation-community-1.onnx  — 偵測語音段落 + 粗略說話者類別
   embedding_model.onnx           — 提取說話者聲紋向量（WeSpeaker）
 
+聚類演算法：
+  兩階段設計 — 先收集所有段落的聲紋向量，再一次做全局聚類。
+  避免貪心算法「鏈式漂移」導致同一說話者被拆成多個 ID 的問題。
+
+  ┌─ 自動模式（n_speakers=None）
+  │   Average-linkage 層次聚類，在 cosine distance 0.38 處切割樹狀圖
+  │   → 自動決定說話者數量
+  └─ 指定人數（n_speakers=N）
+      強制分成 N 組（maxclust criterion）
+      → 適合已知說話者數量的情境，避免過度分割
+
 使用方式：
   from diarize import DiarizationEngine
   eng = DiarizationEngine(model_dir / "diarization")
-  segments = eng.diarize(audio_float32_16khz)
+  segments = eng.diarize(audio_float32_16khz, n_speakers=2)
   # → [(0.40, 4.55, "說話者1"), (4.85, 9.28, "說話者2"), ...]
-
-說明：
-  取代 Silero VAD：分割模型本身即含 VAD（class 0 = 靜音），
-  開啟說話者分離時不需要另外執行 _detect_speech_groups()。
 """
 from __future__ import annotations
 
@@ -30,9 +37,12 @@ SAMPLE_RATE    = 16_000
 WINDOW_SAMPLES = SAMPLE_RATE * 10          # 160,000 samples = 10 秒
 FRAME_SIZE     = 270                       # samples per output frame
 FRAME_START    = 721                       # initial sample offset
-COSINE_THRESH  = 0.70                      # 說話者匹配 cosine 閾值
 MIN_SEG_SEC    = 0.8                       # 過短段落過濾門檻（秒）
 MERGE_GAP_SEC  = 0.30                      # 相鄰同說話者合併間距（秒）
+
+# 自動模式的 cosine distance 切割閾值
+# cosine_dist = 1 - cosine_sim；值越小 → 聚類越嚴格（說話者數越多）
+AUTO_DIST_THRESH = 0.38
 
 
 class DiarizationEngine:
@@ -78,15 +88,20 @@ class DiarizationEngine:
     def diarize(
         self,
         audio: np.ndarray,
+        n_speakers: int | None = None,
     ) -> list[tuple[float, float, str]]:
         """
         對 16kHz float32 音訊執行說話者分離。
+
+        n_speakers : 指定說話者總人數（None = 自動偵測）。
+                     已知人數時強烈建議指定，可避免過度分割。
+
         回傳：[(start_sec, end_sec, "說話者N"), ...]
         已過濾靜音與過短段落，可直接作為 ASR 的分段依據。
         """
         with self._lock:
-            raw = self._segment(audio)
-            return self._embed_and_cluster(audio, raw)
+            raw  = self._segment(audio)
+            return self._embed_and_cluster(audio, raw, n_speakers=n_speakers)
 
     # ── 分割（Segmentation Model）────────────────────────────────
 
@@ -99,7 +114,6 @@ class DiarizationEngine:
         """
         input_name = self.seg_sess.get_inputs()[0].name   # "input_values"
 
-        # 補零至 WINDOW_SAMPLES 整數倍
         n   = len(audio)
         pad = (WINDOW_SAMPLES - n % WINDOW_SAMPLES) % WINDOW_SAMPLES
         padded = np.pad(audio.astype(np.float32), (0, pad))
@@ -108,18 +122,15 @@ class DiarizationEngine:
 
         for win_start in range(0, len(padded), WINDOW_SAMPLES):
             window = padded[win_start: win_start + WINDOW_SAMPLES]
-            inp    = window[np.newaxis, np.newaxis, :]          # [1,1,160000]
-            logits = self.seg_sess.run(
-                None, {input_name: inp}
-            )[0]                                                # [1,767,7]
-            frame_labels = np.argmax(logits[0], axis=-1)        # [767]
+            inp    = window[np.newaxis, np.newaxis, :]
+            logits = self.seg_sess.run(None, {input_name: inp})[0]
+            frame_labels = np.argmax(logits[0], axis=-1)
 
-            def _frame_to_sec(fi: int) -> float:
-                return (win_start + FRAME_START + fi * FRAME_SIZE) / SAMPLE_RATE
+            def _frame_to_sec(fi: int, _ws: int = win_start) -> float:
+                return (_ws + FRAME_START + fi * FRAME_SIZE) / SAMPLE_RATE
 
-            # 合併連續相同 label 的幀
-            cur_lbl    = int(frame_labels[0])
-            seg_start  = 0
+            cur_lbl   = int(frame_labels[0])
+            seg_start = 0
             for fi in range(1, len(frame_labels)):
                 lbl = int(frame_labels[fi])
                 if lbl != cur_lbl:
@@ -132,7 +143,7 @@ class DiarizationEngine:
                 raw_segs.append((_frame_to_sec(seg_start),
                                  _frame_to_sec(len(frame_labels)), cur_lbl))
 
-        # 裁剪超出實際音訊長度的部分 + 過濾過短段落 + 合併相鄰同類段落
+        # 裁剪 + 過濾 + 合併相鄰同類段落
         total_dur = n / SAMPLE_RATE
         merged: list[tuple[float, float, int]] = []
         for t0, t1, lbl in raw_segs:
@@ -164,7 +175,7 @@ class DiarizationEngine:
         fbank = knf.OnlineFbank(opts)
         fbank.accept_waveform(
             float(SAMPLE_RATE),
-            (samples_f32 * 32768.0).tolist(),   # WeSpeaker 需要 ×32768 縮放
+            (samples_f32 * 32768.0).tolist(),
         )
         fbank.input_finished()
 
@@ -175,7 +186,7 @@ class DiarizationEngine:
         feats = np.array(
             [fbank.get_frame(i) for i in range(n_frames)],
             dtype=np.float32,
-        )   # (T, 80)
+        )
         feats -= feats.mean(axis=0, keepdims=True)   # CMN 正規化
         return feats
 
@@ -183,60 +194,59 @@ class DiarizationEngine:
         self, audio: np.ndarray, t0: float, t1: float
     ) -> np.ndarray | None:
         """從 [t0, t1] 秒音訊提取 L2 正規化後的 256 維說話者向量。"""
-        s0   = int(t0 * SAMPLE_RATE)
-        s1   = int(t1 * SAMPLE_RATE)
+        s0    = int(t0 * SAMPLE_RATE)
+        s1    = int(t1 * SAMPLE_RATE)
         chunk = audio[s0:s1]
         if len(chunk) < SAMPLE_RATE * 0.5:
             return None
 
-        feats = self._kaldi_fbank(chunk)              # (T, 80)
-        feats_batch = feats[np.newaxis, :]             # (1, T, 80)
-        out  = self.emb_sess.run(
-            None, {"fbank_features": feats_batch}
-        )[0][0]                                        # (256,)
+        feats = self._kaldi_fbank(chunk)
+        out   = self.emb_sess.run(
+            None, {"fbank_features": feats[np.newaxis, :]}
+        )[0][0]
         norm = np.linalg.norm(out)
         return out / norm if norm > 1e-9 else out
 
-    # ── Cosine 聚類 → 全域說話者 ID ─────────────────────────────
+    # ── 兩階段聚類 ───────────────────────────────────────────────
 
     def _embed_and_cluster(
         self,
         audio: np.ndarray,
         raw_segs: list[tuple[float, float, int]],
+        n_speakers: int | None = None,
     ) -> list[tuple[float, float, str]]:
         """
-        對每個語音段落提取嵌入向量，透過 cosine similarity 聚類成全域說話者 ID。
-        過短段落（< MIN_SEG_SEC）直接跳過。
+        兩階段設計：
+          Stage 1  — 對所有有效段落提取 embedding（先不分類）
+          Stage 2  — 統一做層次聚類，避免貪心順序造成的漂移
         """
-        speaker_embs: dict[int, np.ndarray] = {}
-        results: list[tuple[float, float, str]] = []
-
-        for t0, t1, _local_lbl in raw_segs:
+        # Stage 1：收集所有有效段落的 embedding
+        segs_with_emb: list[tuple[float, float, np.ndarray]] = []
+        for t0, t1, _ in raw_segs:
             if t1 - t0 < MIN_SEG_SEC:
                 continue
             emb = self._get_embedding(audio, t0, t1)
-            if emb is None:
-                continue
+            if emb is not None:
+                segs_with_emb.append((t0, t1, emb))
 
-            # 找最相似的已知說話者
-            best_id  = -1
-            best_sim = COSINE_THRESH
-            for sid, semb in speaker_embs.items():
-                sim = float(np.dot(emb, semb))
-                if sim > best_sim:
-                    best_id, best_sim = sid, sim
+        if not segs_with_emb:
+            return []
 
-            if best_id == -1:
-                # 新說話者
-                best_id = len(speaker_embs) + 1
-                speaker_embs[best_id] = emb
-            else:
-                # 滾動平均更新聲紋原型（提升穩定性）
-                proto = speaker_embs[best_id] * 0.9 + emb * 0.1
-                norm  = np.linalg.norm(proto)
-                speaker_embs[best_id] = proto / norm if norm > 1e-9 else proto
+        embeddings = [e for _, _, e in segs_with_emb]
 
-            results.append((t0, t1, f"說話者{best_id}"))
+        # Stage 2：聚類取得說話者標籤
+        if len(embeddings) == 1:
+            labels = [1]
+        elif n_speakers is not None:
+            labels = self._cluster_fixed_n(embeddings, n_speakers)
+        else:
+            labels = self._cluster_auto(embeddings)
+
+        # 組合結果
+        results = [
+            (t0, t1, f"說話者{lbl}")
+            for (t0, t1, _), lbl in zip(segs_with_emb, labels)
+        ]
 
         # 合併相鄰的同說話者段落
         merged: list[tuple[float, float, str]] = []
@@ -248,3 +258,50 @@ class DiarizationEngine:
                 merged.append((t0, t1, spk))
 
         return merged
+
+    def _cluster_fixed_n(
+        self, embeddings: list[np.ndarray], n: int
+    ) -> list[int]:
+        """
+        指定人數模式：Average-linkage 層次聚類，強制分成 n 組。
+        回傳 1-indexed 標籤列表。
+        """
+        from scipy.cluster.hierarchy import linkage, fcluster
+        from scipy.spatial.distance import squareform
+
+        n = max(1, min(n, len(embeddings)))  # 限制在合理範圍
+        if len(embeddings) <= n:
+            return list(range(1, len(embeddings) + 1))
+
+        emb_mat = np.stack(embeddings)           # (M, 256)
+        sim     = emb_mat @ emb_mat.T            # cosine similarity
+        dist    = np.clip(1.0 - sim, 0.0, 2.0)  # cosine distance
+        np.fill_diagonal(dist, 0.0)
+        condensed = squareform(dist, checks=False)
+
+        Z      = linkage(condensed, method="average")
+        labels = fcluster(Z, t=n, criterion="maxclust")   # 1-indexed
+        return labels.tolist()
+
+    def _cluster_auto(
+        self, embeddings: list[np.ndarray]
+    ) -> list[int]:
+        """
+        自動模式：Average-linkage 層次聚類，在 AUTO_DIST_THRESH 處切割。
+        回傳 1-indexed 標籤列表。
+        """
+        from scipy.cluster.hierarchy import linkage, fcluster
+        from scipy.spatial.distance import squareform
+
+        if len(embeddings) < 2:
+            return [1] * len(embeddings)
+
+        emb_mat = np.stack(embeddings)
+        sim     = emb_mat @ emb_mat.T
+        dist    = np.clip(1.0 - sim, 0.0, 2.0)
+        np.fill_diagonal(dist, 0.0)
+        condensed = squareform(dist, checks=False)
+
+        Z      = linkage(condensed, method="average")
+        labels = fcluster(Z, t=AUTO_DIST_THRESH, criterion="distance")
+        return labels.tolist()

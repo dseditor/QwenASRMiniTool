@@ -30,6 +30,7 @@ import threading
 import queue
 from datetime import datetime
 from pathlib import Path
+import tkinter as tk
 from tkinter import filedialog, messagebox
 
 import numpy as np
@@ -543,6 +544,13 @@ class App(ctk.CTk):
         # 辨識提示（Hint / Context）
         hint_hdr = ctk.CTkFrame(parent, fg_color="transparent")
         hint_hdr.pack(fill="x", padx=8, pady=(6, 0))
+        # 右側按鈕要在左側標籤之前 pack，才能正確定位
+        ctk.CTkButton(
+            hint_hdr, text="讀入 TXT…", width=100, height=26,
+            font=("Microsoft JhengHei", 11),
+            fg_color="gray35", hover_color="gray25",
+            command=lambda: self._load_hint_txt(self.hint_box),
+        ).pack(side="right")
         ctk.CTkLabel(
             hint_hdr, text="辨識提示（可選）：", font=FONT_BODY,
             text_color="#AAAAAA", anchor="w",
@@ -558,6 +566,7 @@ class App(ctk.CTk):
             parent, font=FONT_MONO, height=72,
         )
         self.hint_box.pack(fill="x", padx=8, pady=(2, 4))
+        self._bind_ctx_menu(self.hint_box._textbox, is_text=True)
 
         # 進度
         prog_frame = ctk.CTkFrame(parent, fg_color="transparent")
@@ -610,12 +619,20 @@ class App(ctk.CTk):
         hint_row.pack(fill="x", padx=8, pady=(0, 4))
         ctk.CTkLabel(hint_row, text="辨識提示：", font=FONT_BODY,
                      text_color="#AAAAAA").pack(side="left", padx=(0, 6))
+        # 右側按鈕先 pack
+        ctk.CTkButton(
+            hint_row, text="讀入 TXT…", width=90, height=26,
+            font=("Microsoft JhengHei", 11),
+            fg_color="gray35", hover_color="gray25",
+            command=lambda: self._load_hint_txt(self.rt_hint_entry, is_textbox=False),
+        ).pack(side="right")
         self.rt_hint_entry = ctk.CTkEntry(
             hint_row,
             placeholder_text="（可選）貼入歌詞、關鍵字或說明文字…",
             font=FONT_BODY, height=30,
         )
         self.rt_hint_entry.pack(side="left", fill="x", expand=True)
+        self._bind_ctx_menu(self.rt_hint_entry._entry, is_text=False)
 
         # 控制按鈕列
         btn_row = ctk.CTkFrame(parent, fg_color="transparent")
@@ -677,6 +694,66 @@ class App(ctk.CTk):
         ).pack(side="left")
 
     # ── 模型載入 ───────────────────────────────────────
+
+    # ── Hint 輸入輔助 ─────────────────────────────────────────────────
+
+    def _bind_ctx_menu(self, native_widget, is_text: bool = False):
+        """為原生 tkinter widget 綁定右鍵貼上選單（支援 Text 與 Entry）。"""
+        def show(event):
+            menu = tk.Menu(self, tearoff=0)
+            menu.add_command(
+                label="貼上",
+                command=lambda: native_widget.event_generate("<<Paste>>"),
+            )
+            if is_text:
+                menu.add_command(
+                    label="全選",
+                    command=lambda: native_widget.tag_add("sel", "1.0", "end"),
+                )
+                menu.add_separator()
+                menu.add_command(
+                    label="清除全部",
+                    command=lambda: native_widget.delete("1.0", "end"),
+                )
+            else:
+                menu.add_command(
+                    label="全選",
+                    command=lambda: native_widget.select_range(0, "end"),
+                )
+                menu.add_separator()
+                menu.add_command(
+                    label="清除全部",
+                    command=lambda: native_widget.delete(0, "end"),
+                )
+            menu.tk_popup(event.x_root, event.y_root)
+        native_widget.bind("<Button-3>", show)
+
+    def _load_hint_txt(self, target, is_textbox: bool = True):
+        """開啟 TXT 檔案，將內容填入 hint 輸入框。
+        target     : CTkTextbox（is_textbox=True）或 CTkEntry（is_textbox=False）
+        """
+        path = filedialog.askopenfilename(
+            title="選擇提示文字檔",
+            filetypes=[("文字檔", "*.txt"), ("所有檔案", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+        except UnicodeDecodeError:
+            try:
+                with open(path, "r", encoding="cp950", errors="replace") as f:
+                    text = f.read()
+            except Exception as e:
+                messagebox.showerror("讀取失敗", str(e))
+                return
+        if is_textbox:
+            target.delete("1.0", "end")
+            target.insert("1.0", text)
+        else:
+            target.delete(0, "end")
+            target.insert(0, text)
 
     def _detect_ov_devices(self):
         """

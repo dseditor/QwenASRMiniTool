@@ -1,0 +1,27 @@
+# Qwen3 ASR GPU Version - Runtime Dependencies
+# NOTE: torch (CUDA) must be installed separately before this file.
+#   See: https://pytorch.org/get-started/locally/
+#   Example for CUDA 12.8:
+#     pip install torch --extra-index-url https://download.pytorch.org/whl/cu128
+#   Example for CUDA 13.0 (RTX 50xx Blackwell):
+#     pip install torch --pre --extra-index-url https://download.pytorch.org/whl/nightly/cu130
+
+# ASR model API
+qwen-asr>=0.0.6
+
+# GUI
+customtkinter>=5.2.0
+
+# Inference (VAD only - no OpenVINO needed)
+onnxruntime>=1.17.0
+
+# Audio
+numpy>=1.24.0
+librosa>=0.10.0
+sounddevice>=0.4.6
+
+# Chinese conversion
+opencc-python-reimplemented>=0.1.7
+
+# Model download helper
+huggingface_hub>=0.20.0

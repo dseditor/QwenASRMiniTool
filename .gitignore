@@ -12,6 +12,7 @@ results/
 
 # ── 虛擬環境 ─────────────────────────────────────────
 venv/
+venv-gpu/
 build_venv/
 .venv/
 env/
@@ -20,6 +21,8 @@ env/
 ov_models/qwen3_asr_int8/
 ov_models/silero_vad*.onnx
 onnx_models/
+GPUModel/
+GGUF/
 *.onnx
 *.bin
 *.xml
@@ -29,16 +32,18 @@ onnx_models/
 
 # ── 自動產生的設定/快取檔 ────────────────────────────
 settings.json
+settings-gpu.json
 
 # ── 輸出檔案 ─────────────────────────────────────────
 subtitles/
 *.srt
 installer/
 
-# ── 所有 BAT 檔預設忽略，以下兩個除外 ───────────────────
+# ── 所有 BAT 檔預設忽略，以下三個除外 ───────────────────
 *.bat
 !build.bat
 !build_venv.bat
+!start-gpu.bat
 
 # ── 開發/測試用腳本 ──────────────────────────────────
 test_*.py

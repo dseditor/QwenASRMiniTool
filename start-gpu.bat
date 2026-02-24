@@ -3,9 +3,13 @@ chcp 65001 > nul
 setlocal enabledelayedexpansion
 
 REM ============================================================
-REM   Qwen3 ASR GPU Launcher
+REM   Qwen3 ASR GPU Launcher  (PyTorch version - maintenance mode)
 REM   Uses PyTorch CUDA backend (no OpenVINO required)
 REM   Model: GPUModel\Qwen3-ASR-1.7B
+REM
+REM   NOTE: This PyTorch launcher is in maintenance mode.
+REM         Main GPU support has moved to chatllm_engine.py
+REM         (Vulkan backend) inside QwenASR.exe.
 REM ============================================================
 
 set "SCRIPT_DIR=%~dp0"
@@ -13,7 +17,6 @@ set "GPU_MODEL_DIR=%SCRIPT_DIR%GPUModel"
 set "ASR_MODEL_DIR=%GPU_MODEL_DIR%\Qwen3-ASR-1.7B"
 set "VENV_DIR=%SCRIPT_DIR%venv-gpu"
 set "APP_SCRIPT=%SCRIPT_DIR%app-gpu.py"
-set "SL_SCRIPT=%SCRIPT_DIR%streamlit_app.py"
 set "PYTHON_EXE=python"
 
 REM ---- Clean up leftover temp files from previous runs -------
@@ -113,7 +116,7 @@ echo pkgs=[('qwen_asr','qwen-asr'),('customtkinter','customtkinter'),        >> 
 echo       ('onnxruntime','onnxruntime'),('numpy','numpy'),                  >> "%CHK%"
 echo       ('librosa','librosa'),('sounddevice','sounddevice'),              >> "%CHK%"
 echo       ('opencc','opencc-python-reimplemented'),                         >> "%CHK%"
-echo       ('streamlit','streamlit'),('huggingface_hub','huggingface-hub'),  >> "%CHK%"
+echo       ('huggingface_hub','huggingface-hub'),                            >> "%CHK%"
 echo       ('torch','torch')]                                                 >> "%CHK%"
 echo missing=[p for m,p in pkgs if importlib.util.find_spec(m) is None]     >> "%CHK%"
 echo print(','.join(missing) if missing else 'OK')                           >> "%CHK%"
@@ -227,59 +230,13 @@ echo.
 REM ---- GPU check ---------------------------------------------
 "%PYTHON_EXE%" -c "import torch; avail=torch.cuda.is_available(); print('[OK] CUDA:', torch.cuda.get_device_name(0)) if avail else print('[WARN] CUDA not available - CPU mode')"
 
-REM ---- Step 3/3: Choose interface ----------------------------
+REM ---- Step 3/3: Launch desktop app --------------------------
 echo.
-echo  Step 3/3: Choose Interface
+echo  Step 3/3: Launch
 echo  --------------------------------------------------------
-echo   [1] Streamlit web frontend   (LAN service, http://0.0.0.0:8501)
-echo   [2] CustomTkinter desktop    (local app only)
-echo.
-set /p UI_CHOICE=" Select [1/2, default=1]: "
-if "!UI_CHOICE!"=="" set UI_CHOICE=1
-
-if "!UI_CHOICE!"=="2" goto :launch_ctk
-goto :launch_streamlit
-
-REM ---- Launch Streamlit (foreground) -------------------------
-:launch_streamlit
-echo.
-REM Get LAN IP
-"%PYTHON_EXE%" -c "import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.settimeout(0); s.connect(('8.8.8.8',80)); open('%SCRIPT_DIR%.tmp_ip','w').write(s.getsockname()[0]); s.close()" 2>nul
-set LOCAL_IP=localhost
-if exist "%SCRIPT_DIR%.tmp_ip" (
-    set /p LOCAL_IP=<"%SCRIPT_DIR%.tmp_ip"
-    del "%SCRIPT_DIR%.tmp_ip" 2>nul
-)
-
-if not exist "%SL_SCRIPT%" (
-    echo  [ERROR] streamlit_app.py not found: %SL_SCRIPT%
-    pause & exit /b 1
-)
-
-echo  ============================================================
-echo   Streamlit Web Frontend
-echo  ============================================================
-echo.
-echo   Local    :  http://127.0.0.1:8501
-echo   Network  :  http://!LOCAL_IP!:8501
-echo.
-echo   Share the Network URL with anyone on the same LAN.
-echo   Press Ctrl+C to stop the server.
-echo.
-echo  ============================================================
-echo.
-echo  [>>] Starting Streamlit...
-echo.
-"%PYTHON_EXE%" -m streamlit run "%SL_SCRIPT%" --server.port 8501 --server.address 0.0.0.0 --browser.gatherUsageStats false --theme.base dark
-if errorlevel 1 (
-    echo.
-    echo  [!] Streamlit exited with error. See message above.
-    pause
-)
-goto :done
-
-REM ---- Launch CustomTkinter desktop (foreground) -------------
-:launch_ctk
+echo  [NOTE] Streamlit frontend has been removed from this launcher.
+echo         For Vulkan GPU support (NVIDIA/AMD), use QwenASR.exe instead.
+echo         This launcher starts the PyTorch CustomTkinter desktop app.
 echo.
 echo  [>>] Starting desktop app (app-gpu.py)...
 echo.

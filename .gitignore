@@ -69,6 +69,10 @@ test_audio/
 *.flac
 *.m4a
 
+# ── chatllm DLL 目錄（二進位，體積大，從 GitHub Releases 取得）────────
+chatllm/
+chatllmtest/
+
 # ── 其他 ─────────────────────────────────────────────
 .claude/
 *.jpg

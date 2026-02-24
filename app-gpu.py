@@ -1,5 +1,5 @@
 """
-Qwen3 ASR 字幕生成器 - GPU 版本
+Qwen3 ASR 字幕生成器 - GPU 版本（PyTorch 版本，暫停更新）
 
 推理後端：PyTorch (CUDA / CPU)，使用 Qwen3-ASR-1.7B
 模型路徑：GPUModel/Qwen3-ASR-1.7B
@@ -8,6 +8,11 @@ Qwen3 ASR 字幕生成器 - GPU 版本
 此檔案不納入 EXE 構建，供有 NVIDIA GPU 的使用者以
 系統 Python 或獨立虛擬環境執行。
 啟動方式：start-gpu.bat
+
+NOTE: 此 PyTorch GPU 版本目前暫停更新，僅供保留舊版參考。
+      主要 GPU 支援已改為 chatllm_engine.py（Vulkan 後端），
+      可於 app.py 的 EXE 版本中使用，無須 PyTorch 環境。
+      若有需要再行維護此 PyTorch 版本。
 """
 from __future__ import annotations
 

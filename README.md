@@ -3,7 +3,7 @@
 本地語音辨識字幕生成工具。基於 Qwen3-ASR-0.6B 模型，
 使用 OpenVINO INT8 量化推理，**EXE 版本不使用 GPU**，純 CPU 即可執行。
 此版本辨識率普通，主要是要你同事、你同學，拷貝給你阿嬤都能免費進行語音辨識。
-若有 NVIDIA GPU（RTX 系列），可使用 **Source 版本**搭配 `start-gpu.bat` 啟動 GPU 模式，載入 1.7B 模型以獲得更高辨識率。
+若有 NVIDIA 或 AMD GPU，**EXE 版本**現已整合 Vulkan GPU 後端（chatllm），可於引導介面選擇 GPU 模式，載入 1.7B GGUF 模型以獲得更高辨識率。
 
 ---
 
@@ -151,6 +151,59 @@ Streamlit 前端可從網路端點（例如手機上）使用麥克風，採取�
 
 ---
 
+### 模型下載引導介面（0223 更新）
+
+![模型下載引導](Readme/readme13.jpg)
+
+啟動時若尚未完成設定，程式會引導使用者選擇推理後端與下載所需模型：
+- **CPU 模式**：下載 OpenVINO INT8 模型（0.6B 或 1.7B），純 CPU 執行，免安裝驅動
+- **GPU 模式（Vulkan）**：下載 Qwen3-ASR-1.7B GGUF bin 檔（~2.3 GB），適用 NVIDIA / AMD / Intel 顯示卡
+- 可一次勾選需要的項目，程式自動依序下載完成後載入
+
+---
+
+### 字幕驗證與編輯（0223 新增）
+
+![字幕驗證編輯](Readme/readme14.jpg)
+
+轉換完成後，點選「**🔍 字幕驗證**」按鈕開啟字幕編輯視窗：
+- 每條字幕顯示起迄時間、說話者（多人模式）、文字內容
+- **播放**：從該段時間點播放片段，確認辨識是否正確
+- **+** / **−**：新增或刪除字幕條目
+- **說話者標籤**：多人模式下可下拉調整每條字幕的說話者，並於頂部欄位設定各說話者的自訂名稱
+- 完成後點「**儲存**」，產生 `{原檔名}_edited_{時間戳}.srt`
+
+---
+
+### Vulkan GPU 支援（0223 新增）
+
+![Vulkan GPU 支援](Readme/readme15.jpg)
+
+本版本 EXE 已整合 **chatllm Vulkan 後端**，支援主流 GPU 加速推理：
+- **NVIDIA**（RTX 系列）、**AMD**（RX 系列）、**Intel** Arc 均可使用
+- 無須安裝 CUDA 或 ROCm，使用 Vulkan 標準介面
+- 啟動時自動偵測可用 GPU，引導介面選擇後端（CPU OpenVINO / GPU Vulkan）
+- GPU 模式載入 1.7B GGUF 模型（~2.3 GB），辨識率顯著優於 0.6B CPU 版本
+
+> 感謝 [foldl/chatllm.cpp](https://github.com/foldl/chatllm.cpp)（MIT 授權）提供 Vulkan 推理引擎。
+> 本專案使用其預編譯的 `libchatllm.dll` / `ggml-vulkan.dll` / `main.exe`，
+> 未從原始碼編譯。預編譯版本由 chatllm.cpp 官方於 GitHub Releases 提供。
+
+---
+
+### Streamlit 伺服器模式（0223 更新，實驗性）
+
+![Streamlit 伺服器](Readme/readme16.jpg)
+
+EXE 版本現在可於「**服務**」分頁啟動 Streamlit 網頁前端，以 Vulkan GPU 作為推理核心，
+可在內網以瀏覽器或手機存取。
+
+> ⚠️ **注意：此功能目前穩定度不足，請謹慎使用。**
+> 已知問題包括：長時間運行可能出現例外、音訊串流不穩定等。
+> 建議於測試環境評估，正式場景請繼續使用桌面應用（CustomTkinter）。
+
+---
+
 ## 更版方式
 
 ### Python 版本
@@ -172,15 +225,16 @@ git pull
 
 ## 系統需求
 
-| 項目 | 最低要求 |
-|------|---------|
-| 作業系統 | Windows 10 / 11（64-bit）|
-| Python | 3.10 以上 |
-| RAM | 6 GB（推理時峰值約 4.8 GB）|
-| 硬碟空間 | 2 GB（模型 1.2 GB + 程式）|
-| CPU | Intel 11th Gen+ 或同等級 AMD |
+| 項目 | CPU 模式（最低） | GPU 模式（Vulkan）|
+|------|----------------|-----------------|
+| 作業系統 | Windows 10 / 11（64-bit）| Windows 10 / 11（64-bit）|
+| Python | 3.10 以上（Source 版） | 3.10 以上（Source 版）|
+| RAM | 6 GB（峰值約 4.8 GB）| 8 GB（1.7B GGUF 約 2.5 GB）|
+| 硬碟空間 | 2 GB（0.6B 模型 1.2 GB）| 4 GB（1.7B bin 約 2.3 GB）|
+| CPU | 任意 x86-64 | 任意 x86-64 |
+| GPU | 不需要 | Vulkan 1.2+ 相容（NVIDIA / AMD / Intel）|
 
-> GPU 非必要，EXE 版本純 CPU 即可執行。若有 NVIDIA GPU（RTX 系列），可使用 Source 版本搭配 `start-gpu.bat` 啟用 CUDA 加速。
+> ⚠️ **已知問題**：若安裝路徑含有中文字元，程式可能無法正常執行。請將程式安裝於全英文路徑（例如 `C:\QwenASR`）。
 
 ---
 
@@ -191,10 +245,14 @@ git pull
 | 0.6B OpenVINO INT8（主要下載源） | [dseditor/Qwen3-ASR-0.6B-INT8_ASYM-OpenVINO](https://huggingface.co/dseditor/Qwen3-ASR-0.6B-INT8_ASYM-OpenVINO) |
 | 0.6B OpenVINO INT8（備用下載源） | [Echo9Zulu/Qwen3-ASR-0.6B-INT8_ASYM-OpenVINO](https://huggingface.co/Echo9Zulu/Qwen3-ASR-0.6B-INT8_ASYM-OpenVINO) |
 | **1.7B OpenVINO INT8 KV-Cache** | [dseditor/Qwen3-ASR-1.7B-INT8_OpenVINO](https://huggingface.co/dseditor/Qwen3-ASR-1.7B-INT8_OpenVINO) |
+| **1.7B GGUF bin（GPU Vulkan 用）** | [dseditor/Collection](https://huggingface.co/dseditor/Collection)（`qwen3-asr-1.7b.bin`，~2.3 GB） |
 | 原始 PyTorch 模型（0.6B） | [Qwen/Qwen3-ASR-0.6B](https://huggingface.co/Qwen/Qwen3-ASR-0.6B) |
 | 原始 PyTorch 模型（1.7B） | [Qwen/Qwen3-ASR-1.7B](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) |
 | VAD 模型 | [snakers4/silero-vad v4.0](https://github.com/snakers4/silero-vad) |
 | 說話者分離模型（分段 + 聲紋）| [altunenes/speaker-diarization-community-1-onnx](https://huggingface.co/altunenes/speaker-diarization-community-1-onnx) |
+
+> **1.7B GGUF 模型說明**：`qwen3-asr-1.7b.bin` 為 INT4 量化版本，由 [chatllm.cpp](https://github.com/foldl/chatllm.cpp) 支援的格式，
+> 作者已量化完成並上傳至 ModelScope 及 HuggingFace。直接下載即可使用，無需自行量化。
 
 ---
 
@@ -217,13 +275,19 @@ python generate_prompt_template.py
 
 ```
 app.py                  # CustomTkinter GUI 主程式（Basic / Portable EXE）
-app-gpu.py              # CustomTkinter GPU 版本（需 NVIDIA GPU + PyTorch CUDA）
-app_streamlit.py        # Streamlit 前端（GPU 服務版，可由 start-gpu.bat 啟動）
-start-gpu.bat           # GPU 版啟動器（配置 venv、下載模型、選擇前端）
-downloader.py           # 模型完整性檢查與自動下載（含 1.7B、說話者分離）
+chatllm_engine.py       # Vulkan GPU 推理引擎（chatllm.cpp subprocess 包裝）
+streamlit_app.py        # Streamlit 前端（EXE 服務分頁，實驗性）
+app-gpu.py              # PyTorch CUDA 版本（維護模式，不再主動更新）
+start-gpu.bat           # PyTorch GPU 啟動器（維護模式）
+downloader.py           # 模型完整性檢查與自動下載（含 LFS 指標檔偵測）
 processor_numpy.py      # 純 numpy Mel / BPE 處理器（不依賴 torch）
 diarize.py              # 說話者分離引擎（兩階段聚類，不依賴 torch）
 generate_prompt_template.py  # 從原始模型提取 prompt 模板
+chatllm/                # Vulkan 推理 DLL 與執行檔（非 EXE 內部，需另行提供）
+  libchatllm.dll             # 主要推理引擎（chatllm.cpp 預編譯）
+  ggml-vulkan.dll            # Vulkan GPU 後端
+  ggml-cpu-*.dll             # CPU fallback 變體
+  main.exe                   # GPU 偵測與推理執行檔
 ov_models/
   mel_filters.npy            # 預計算 Mel 濾波器
   silero_vad_v4.onnx         # VAD 靜音偵測模型
@@ -232,10 +296,21 @@ ov_models/
   diarization/               # 說話者分離 ONNX 模型（首次使用時下載，~32 MB）
     segmentation-community-1.onnx
     embedding_model.onnx
+GPUModel/
+  qwen3-asr-1.7b.bin         # 1.7B GGUF bin（Vulkan 用，按需下載，~2.3 GB）
 ```
+
+### 第三方函式庫致謝
+
+- **[chatllm.cpp](https://github.com/foldl/chatllm.cpp)**（foldl，MIT 授權）
+  本專案使用 chatllm.cpp 的預編譯 DLL 與執行檔作為 Vulkan GPU 推理後端。
+  我們使用的是官方 GitHub Releases 提供的 Windows 預編譯版本，未從原始碼自行編譯。
+  感謝作者 foldl 提供高效的多後端 LLM 推理引擎，並支援 Qwen3-ASR 模型格式。
 
 ---
 
 ## 授權
 
 本專案程式碼以 MIT 授權釋出。模型權重依各自來源的授權條款。
+
+Vulkan GPU 後端使用 [chatllm.cpp](https://github.com/foldl/chatllm.cpp)（MIT 授權）預編譯二進位檔。

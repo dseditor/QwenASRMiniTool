@@ -45,6 +45,22 @@ echo openvino          : %OV_PKG%
 echo kaldi_native_fbank: %KNF_DIR%
 
 echo.
+echo === Step 2b: Ensure silero_vad_v4.onnx is present before bundling ===
+REM VAD model must exist locally so --add-data can bundle it into _internal/ov_models/
+REM If missing, download it now (small file ~2 MB from GitHub).
+IF NOT EXIST "%SRC%\ov_models\silero_vad_v4.onnx" (
+    echo   silero_vad_v4.onnx not found, downloading...
+    %PYTHON% -c "from downloader import _download_file, _VAD_URL; from pathlib import Path; p=Path(r'%SRC%\ov_models'); p.mkdir(exist_ok=True); _download_file(_VAD_URL, p/'silero_vad_v4.onnx')"
+    IF ERRORLEVEL 1 (
+        echo   WARNING: VAD download failed - bundling skipped. Users will download at runtime.
+    ) ELSE (
+        echo   silero_vad_v4.onnx downloaded OK.
+    )
+) ELSE (
+    echo   silero_vad_v4.onnx already present.
+)
+
+echo.
 echo === Step 3: Build with PyInstaller (onedir) ===
 
 REM --onedir is the DEFAULT (no --onefile flag).
@@ -68,6 +84,7 @@ REM Chinese Windows (cp950 default encoding).
     --add-data "%KNF_DIR%;kaldi_native_fbank" ^
     --add-data "%SRC%\prompt_template.json;." ^
     --add-data "%SRC%\ov_models\mel_filters.npy;ov_models" ^
+    --add-data "%SRC%\ov_models\silero_vad_v4.onnx;ov_models" ^
     --runtime-hook "%SRC%\runtime_hook_utf8.py" ^
     --collect-all tokenizers ^
     --hidden-import openvino ^
@@ -77,6 +94,7 @@ REM Chinese Windows (cp950 default encoding).
     --hidden-import customtkinter ^
     --hidden-import sounddevice ^
     --hidden-import librosa ^
+    --hidden-import soundfile ^
     --hidden-import kaldi_native_fbank ^
     --hidden-import scipy ^
     --hidden-import scipy.cluster ^
@@ -97,9 +115,61 @@ REM Chinese Windows (cp950 default encoding).
 echo.
 IF EXIST "%SRC%\dist\QwenASR\QwenASR.exe" (
     echo ===================================================
-    echo  Build SUCCESS
+    echo  Build SUCCESS - Copying chatllm DLLs...
+    echo ===================================================
+
+    REM Copy chatllm DLLs + main.exe to dist\QwenASR\chatllm\
+    REM These are needed for Vulkan GPU backend (libchatllm.dll, ggml-vulkan.dll, etc.)
+    REM  libchatllm.dll  - newly built (2026-02-23), supports ASR models
+    REM  ggml-vulkan.dll - Vulkan GPU backend (52 MB shader kernels)
+    REM  ggml-cpu-*.dll  - CPU fallback variants (selected at runtime)
+    REM  main.exe        - used for --show_devices GPU detection only
+
+    IF EXIST "%SRC%\chatllm" (
+        xcopy "%SRC%\chatllm\libchatllm.dll"         "%SRC%\dist\QwenASR\chatllm\" /Y /Q
+        xcopy "%SRC%\chatllm\ggml.dll"               "%SRC%\dist\QwenASR\chatllm\" /Y /Q
+        xcopy "%SRC%\chatllm\ggml-base.dll"          "%SRC%\dist\QwenASR\chatllm\" /Y /Q
+        xcopy "%SRC%\chatllm\ggml-cpu-alderlake.dll" "%SRC%\dist\QwenASR\chatllm\" /Y /Q
+        xcopy "%SRC%\chatllm\ggml-cpu-haswell.dll"   "%SRC%\dist\QwenASR\chatllm\" /Y /Q
+        xcopy "%SRC%\chatllm\ggml-cpu-icelake.dll"   "%SRC%\dist\QwenASR\chatllm\" /Y /Q
+        xcopy "%SRC%\chatllm\ggml-cpu-sandybridge.dll" "%SRC%\dist\QwenASR\chatllm\" /Y /Q
+        xcopy "%SRC%\chatllm\ggml-cpu-skylakex.dll"  "%SRC%\dist\QwenASR\chatllm\" /Y /Q
+        xcopy "%SRC%\chatllm\ggml-cpu-sse42.dll"     "%SRC%\dist\QwenASR\chatllm\" /Y /Q
+        xcopy "%SRC%\chatllm\ggml-cpu-x64.dll"       "%SRC%\dist\QwenASR\chatllm\" /Y /Q
+        xcopy "%SRC%\chatllm\ggml-rpc.dll"           "%SRC%\dist\QwenASR\chatllm\" /Y /Q
+        xcopy "%SRC%\chatllm\ggml-vulkan.dll"        "%SRC%\dist\QwenASR\chatllm\" /Y /Q
+        xcopy "%SRC%\chatllm\libcrypto-1_1-x64.dll"  "%SRC%\dist\QwenASR\chatllm\" /Y /Q
+        xcopy "%SRC%\chatllm\libssl-1_1-x64.dll"     "%SRC%\dist\QwenASR\chatllm\" /Y /Q
+        xcopy "%SRC%\chatllm\vulkan-1.dll"            "%SRC%\dist\QwenASR\chatllm\" /Y /Q
+        xcopy "%SRC%\chatllm\main.exe"               "%SRC%\dist\QwenASR\chatllm\" /Y /Q
+        echo  chatllm/    : DLLs copied to dist\QwenASR\chatllm\
+    ) ELSE (
+        echo  WARNING: chatllm\ not found - GPU backend will not be available
+        echo  Copy chatllm DLLs to %SRC%\chatllm\ before building.
+    )
+
+    echo.
+    REM Copy streamlit_app.py (needed by the service tab to run Streamlit)
+    xcopy "%SRC%\streamlit_app.py"               "%SRC%\dist\QwenASR\" /Y /Q
+    echo  streamlit_app.py copied to dist\QwenASR\
+
+    REM Copy python.exe + python3*.dll to _python\ subdirectory (NOT the EXE root).
+    REM Reason: placing python3XX.dll in the same dir as QwenASR.exe causes Windows
+    REM DLL loader to load TWO different copies of the Python DLL (one for QwenASR.exe
+    REM via PyInstaller _internal/, one for python.exe via the root dir), which can
+    REM produce undefined behavior and per-chunk window flashes in windowed mode.
+    REM python.exe finds python3XX.dll in its own directory (_python\), which is correct.
+    xcopy "%VENV%\Scripts\python.exe"            "%SRC%\dist\QwenASR\_python\" /Y /Q
+    xcopy "%VENV%\Scripts\python3*.dll"          "%SRC%\dist\QwenASR\_python\" /Y /Q 2>NUL
+    echo  python.exe  copied to dist\QwenASR\_python\  (required for Streamlit service)
+
     echo  Launcher : dist\QwenASR\QwenASR.exe
     echo  Runtime  : dist\QwenASR\_internal\
+    echo  GPU DLLs : dist\QwenASR\chatllm\   (~71 MB, Vulkan backend)
+    echo.
+    echo  Model downloaded at first run from:
+    echo    https://huggingface.co/dseditor/Collection/resolve/main/qwen3-asr-1.7b.bin
+    echo  Saved to: {app}\GPUModel\qwen3-asr-1.7b.bin  (~2.3 GB)
     echo.
     echo  Next step: open setup.iss with Inno Setup
     echo  to produce QwenASR_Setup.exe for distribution.

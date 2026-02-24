@@ -24,10 +24,12 @@ del _os, _sys, _io, _stream_name, _s
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import threading
 import queue
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
@@ -35,6 +37,15 @@ from tkinter import filedialog, messagebox
 
 import numpy as np
 import customtkinter as ctk
+
+# ── chatllm 後端（可選，import 延遲到 load 時進行）────────────────────
+try:
+    from chatllm_engine import ChatLLMASREngine, detect_vulkan_devices
+    _CHATLLM_AVAILABLE = True
+except Exception:
+    _CHATLLM_AVAILABLE = False
+    ChatLLMASREngine   = None
+    def detect_vulkan_devices(_): return []
 
 # ── 路徑 ──────────────────────────────────────────────
 # PyInstaller 凍結時，模型應放在 EXE 旁邊（非 _internal/）
@@ -45,6 +56,15 @@ else:
 _DEFAULT_MODEL_DIR = BASE_DIR / "ov_models"
 SETTINGS_FILE      = BASE_DIR / "settings.json"
 SRT_DIR            = BASE_DIR / "subtitles"
+_CHATLLM_DIR       = BASE_DIR / "chatllm"
+# .bin 優先找 ov_models/（開發期），再找 GPUModel/（打包後下載位置）
+_BIN_PATH          = next(
+    (p for p in [
+        BASE_DIR / "ov_models"  / "qwen3-asr-1.7b.bin",
+        BASE_DIR / "GPUModel"   / "qwen3-asr-1.7b.bin",
+    ] if p.exists()),
+    BASE_DIR / "GPUModel" / "qwen3-asr-1.7b.bin",  # 預設（未下載時）
+)
 SRT_DIR.mkdir(exist_ok=True)
 
 # ── 常數 ──────────────────────────────────────────────
@@ -630,6 +650,391 @@ FONT_MONO  = ("Consolas", 12)
 FONT_TITLE = ("Microsoft JhengHei", 22, "bold")
 
 
+# ══════════════════════════════════════════════════════════════════════
+# 字幕驗證 & 編輯視窗
+# ══════════════════════════════════════════════════════════════════════
+
+class SubtitleEditorWindow(ctk.CTkToplevel):
+    """字幕逐條驗證、段落試聽與編輯的獨立子視窗。
+
+    功能：
+      - 逐條顯示 SRT 字幕（起迄時間可直接編輯）
+      - ▶ 段落試聽：從音訊指定時間點播放到結束點後停止
+      - (+) / (−)：在指定條目後新增 / 刪除條目
+      - 多說話者模式：不同顏色區別說話者，可下拉切換，可命名
+      - 確認儲存 → <原檔>_edited_<時間戳>.srt
+    """
+
+    # 每位說話者的行背景色（深色主題）
+    _SPK_ROW_BG = [
+        "#122030",  # 0 深藍
+        "#102010",  # 1 深綠
+        "#241508",  # 2 深橙棕
+        "#1C1028",  # 3 深紫
+        "#281010",  # 4 深紅
+        "#0E2020",  # 5 深青
+    ]
+    # 說話者強調色（文字 / 邊框 / 按鈕）
+    _SPK_ACCENT = [
+        "#5DADE2",  # 0 亮藍
+        "#58D68D",  # 1 亮綠
+        "#F0B27A",  # 2 橙
+        "#C39BD3",  # 3 紫
+        "#F1948A",  # 4 粉紅
+        "#76D7C4",  # 5 青
+    ]
+
+    def __init__(
+        self,
+        parent,
+        srt_path: Path,
+        audio_path: "Path | None",
+        diarize_mode: bool = False,
+    ):
+        super().__init__(parent)
+        self.srt_path     = srt_path
+        self.audio_path   = audio_path
+        self.diarize_mode = diarize_mode
+
+        self._audio_data: "np.ndarray | None" = None
+        self._audio_sr   = 16000
+        self._rows: list[dict] = []   # 每條 = {start, end, speaker, text} StringVar
+
+        raw = self._parse_srt(srt_path)
+        self._all_spk_ids: list[str] = sorted({e["speaker"] for e in raw if e["speaker"]})
+        self.has_speakers = bool(self._all_spk_ids) and diarize_mode
+
+        # 說話者顯示名稱（使用者可修改，預設「說話者1」…）
+        self._spk_name_vars: dict[str, ctk.StringVar] = {
+            sid: ctk.StringVar(value=f"說話者{i + 1}")
+            for i, sid in enumerate(self._all_spk_ids)
+        }
+        self._init_rows(raw)
+        self._build_ui()
+
+        if audio_path and audio_path.exists():
+            threading.Thread(target=self._load_audio, daemon=True).start()
+
+    # ── SRT 解析 ─────────────────────────────────────────────────────
+
+    def _parse_srt(self, path: Path) -> list[dict]:
+        text   = path.read_text(encoding="utf-8")
+        blocks = re.split(r"\n\s*\n", text.strip())
+        out: list[dict] = []
+        for block in blocks:
+            lines = block.strip().splitlines()
+            if len(lines) < 3:
+                continue
+            m = re.match(
+                r"(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})",
+                lines[1],
+            )
+            if not m:
+                continue
+            content = " ".join(l.strip() for l in lines[2:])
+            speaker = ""
+            sm = re.match(r"^(說話者\d+|Speaker\s*\d+)：(.+)$", content, re.DOTALL)
+            if sm:
+                speaker = sm.group(1)
+                content = sm.group(2).strip()
+            out.append({
+                "start": m.group(1), "end": m.group(2),
+                "speaker": speaker,  "text": content,
+            })
+        return out
+
+    def _init_rows(self, entries: list[dict]):
+        self._rows = [
+            {
+                "start":   ctk.StringVar(value=e["start"]),
+                "end":     ctk.StringVar(value=e["end"]),
+                "speaker": ctk.StringVar(value=e["speaker"]),
+                "text":    ctk.StringVar(value=e["text"]),
+            }
+            for e in entries
+        ]
+
+    @staticmethod
+    def _ts_to_sec(ts: str) -> float:
+        try:
+            h, m, rest = ts.split(":")
+            s, ms = rest.split(",")
+            return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
+        except Exception:
+            return 0.0
+
+    # ── UI 建構 ──────────────────────────────────────────────────────
+
+    def _build_ui(self):
+        self.title(f"字幕驗證編輯器 — {self.srt_path.name}")
+        self.geometry("960x680")
+        self.resizable(True, True)
+        self.minsize(720, 420)
+        self.grab_set()
+
+        if self.has_speakers:
+            self._build_spk_name_bar()
+        self._build_header()
+
+        self._sf = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self._sf.pack(fill="both", expand=True, padx=6, pady=(0, 4))
+
+        self._rebuild_rows()
+        self._build_bottom()
+
+    def _build_spk_name_bar(self):
+        bar = ctk.CTkFrame(self, fg_color="#1A1A2E", corner_radius=8)
+        bar.pack(fill="x", padx=6, pady=(8, 2))
+        ctk.CTkLabel(
+            bar, text="說話者命名：",
+            font=("Microsoft JhengHei", 12, "bold"), text_color="#888899",
+        ).pack(side="left", padx=(10, 8), pady=6)
+        for i, sid in enumerate(self._all_spk_ids):
+            accent = self._SPK_ACCENT[i % len(self._SPK_ACCENT)]
+            ctk.CTkLabel(
+                bar, text=f"{sid}：",
+                font=("Microsoft JhengHei", 12), text_color=accent,
+            ).pack(side="left", padx=(0, 2))
+            ctk.CTkEntry(
+                bar, textvariable=self._spk_name_vars[sid],
+                width=80, height=28, font=("Microsoft JhengHei", 12),
+            ).pack(side="left", padx=(0, 14))
+
+    def _build_header(self):
+        hdr = ctk.CTkFrame(self, fg_color="#1E1E32", corner_radius=0, height=26)
+        hdr.pack(fill="x", padx=6, pady=(2, 0))
+        hdr.pack_propagate(False)
+        cols = [("  #", 36), ("起始時間", 110), (" ", 22), ("結束時間", 110)]
+        if self.has_speakers:
+            cols.append(("說話者", 98))
+        cols.append(("字幕文字", 0))
+        cols.append(("操作", 98))
+        for txt, w in cols:
+            kw: dict = dict(
+                text=txt, font=("Microsoft JhengHei", 11),
+                text_color="#55556A", anchor="w",
+            )
+            if w:
+                kw["width"] = w
+            ctk.CTkLabel(hdr, **kw).pack(side="left", padx=(4, 0))
+
+    def _rebuild_rows(self):
+        for w in self._sf.winfo_children():
+            w.destroy()
+        for i, row in enumerate(self._rows):
+            self._build_one_row(i, row)
+
+    def _build_one_row(self, idx: int, row: dict):
+        spk_id = row["speaker"].get()
+        ci = self._all_spk_ids.index(spk_id) if spk_id in self._all_spk_ids else -1
+
+        if self.has_speakers and ci >= 0:
+            bg = self._SPK_ROW_BG[ci % len(self._SPK_ROW_BG)]
+        else:
+            bg = "#1C1C1C" if idx % 2 == 0 else "#222228"
+
+        # 行 frame（pack 到 scroll frame）
+        fr = ctk.CTkFrame(self._sf, fg_color=bg, corner_radius=4)
+        fr.pack(fill="x", padx=2, pady=1)
+
+        # 文字欄使用 grid weight 佔滿剩餘寬度
+        text_col = 5 if self.has_speakers else 4
+        fr.columnconfigure(text_col, weight=1)
+
+        col = 0
+        # 序號
+        ctk.CTkLabel(
+            fr, text=str(idx + 1), width=32, anchor="e",
+            font=("Consolas", 11), text_color="#555566",
+        ).grid(row=0, column=col, padx=(6, 2), pady=5)
+        col += 1
+
+        # 起始時間
+        ctk.CTkEntry(
+            fr, textvariable=row["start"], width=108, height=28,
+            font=FONT_MONO, justify="center",
+        ).grid(row=0, column=col, padx=(2, 0), pady=4)
+        col += 1
+
+        # 箭頭
+        ctk.CTkLabel(
+            fr, text="→", width=22, font=("Microsoft JhengHei", 12),
+            text_color="#444455",
+        ).grid(row=0, column=col)
+        col += 1
+
+        # 結束時間
+        ctk.CTkEntry(
+            fr, textvariable=row["end"], width=108, height=28,
+            font=FONT_MONO, justify="center",
+        ).grid(row=0, column=col, padx=(0, 4), pady=4)
+        col += 1
+
+        # 說話者下拉（多說話者模式）
+        if self.has_speakers:
+            accent = self._SPK_ACCENT[ci % len(self._SPK_ACCENT)] if ci >= 0 else "#666677"
+            ctk.CTkComboBox(
+                fr, variable=row["speaker"], values=list(self._all_spk_ids),
+                width=94, height=28, font=("Microsoft JhengHei", 11),
+                button_color=accent, border_color=accent,
+                command=lambda v, i=idx: self._on_spk_change(i),
+            ).grid(row=0, column=col, padx=(0, 4), pady=4)
+            col += 1
+
+        # 字幕文字（sticky="ew" 填滿剩餘寬度）
+        ctk.CTkEntry(
+            fr, textvariable=row["text"], height=28,
+            font=("Microsoft JhengHei", 12),
+        ).grid(row=0, column=col, sticky="ew", padx=(0, 4), pady=4)
+        col += 1
+
+        # 操作按鈕組
+        btn_fr = ctk.CTkFrame(fr, fg_color="transparent")
+        btn_fr.grid(row=0, column=col, padx=(0, 6), pady=4)
+
+        ctk.CTkButton(
+            btn_fr, text="+", width=26, height=26,
+            fg_color="#1B4A1B", hover_color="#28602A",
+            font=("Consolas", 13, "bold"),
+            command=lambda i=idx: self._add_after(i),
+        ).pack(side="left", padx=(0, 2))
+
+        ctk.CTkButton(
+            btn_fr, text="−", width=26, height=26,
+            fg_color="#4A1B1B", hover_color="#602828",
+            font=("Consolas", 13, "bold"),
+            command=lambda i=idx: self._delete(i),
+        ).pack(side="left", padx=(0, 2))
+
+        ctk.CTkButton(
+            btn_fr, text="▶", width=34, height=26,
+            fg_color="#1A3A5C", hover_color="#265A8A",
+            font=("Microsoft JhengHei", 11),
+            command=lambda r=row: self._play(r),
+        ).pack(side="left")
+
+    # ── 行操作 ───────────────────────────────────────────────────────
+
+    def _on_spk_change(self, idx: int):
+        """說話者切換後重建行（更新背景色）。"""
+        self._rebuild_rows()
+
+    def _add_after(self, idx: int):
+        """在 idx 後插入空白行，起迄時間繼承當前行的結束點。"""
+        cur_end = self._rows[idx]["end"].get()
+        self._rows.insert(idx + 1, {
+            "start":   ctk.StringVar(value=cur_end),
+            "end":     ctk.StringVar(value=cur_end),
+            "speaker": ctk.StringVar(value=self._rows[idx]["speaker"].get()),
+            "text":    ctk.StringVar(value=""),
+        })
+        self._rebuild_rows()
+
+    def _delete(self, idx: int):
+        if len(self._rows) <= 1:
+            return
+        del self._rows[idx]
+        self._rebuild_rows()
+
+    # ── 音訊播放 ─────────────────────────────────────────────────────
+
+    def _play(self, row: dict):
+        """段落試聽：從起始時間播放到結束時間後自動停止。"""
+        try:
+            import sounddevice as sd
+            sd.stop()
+            if self._audio_data is None:
+                return
+            s  = self._ts_to_sec(row["start"].get())
+            e  = self._ts_to_sec(row["end"].get())
+            if e <= s:
+                return
+            si  = max(0, int(s * self._audio_sr))
+            ei  = min(len(self._audio_data), int(e * self._audio_sr))
+            seg = self._audio_data[si:ei]
+            if len(seg) > 0:
+                sd.play(seg, self._audio_sr)
+        except Exception:
+            pass
+
+    def _load_audio(self):
+        """背景執行緒載入音訊（soundfile 優先，librosa 備用）。"""
+        try:
+            import soundfile as sf
+            data, sr = sf.read(str(self.audio_path), always_2d=False, dtype="float32")
+            if data.ndim > 1:
+                data = data.mean(axis=1)
+            if sr != 16000:
+                import librosa
+                data = librosa.resample(data, orig_sr=sr, target_sr=16000)
+            self._audio_data = data
+            self._audio_sr   = 16000
+        except Exception:
+            try:
+                import librosa
+                data, _ = librosa.load(str(self.audio_path), sr=16000, mono=True)
+                self._audio_data = data
+                self._audio_sr   = 16000
+            except Exception:
+                self._audio_data = None
+
+    # ── 底部操作列 ───────────────────────────────────────────────────
+
+    def _build_bottom(self):
+        bot = ctk.CTkFrame(self, fg_color="#14141E", corner_radius=0, height=54)
+        bot.pack(fill="x", side="bottom")
+        bot.pack_propagate(False)
+
+        ctk.CTkLabel(
+            bot, text="確認後儲存為 ＊_edited_時間戳.srt",
+            font=("Microsoft JhengHei", 11), text_color="#40405A",
+        ).pack(side="left", padx=14)
+
+        ctk.CTkButton(
+            bot, text="✖  取消", width=100, height=36,
+            fg_color="#38181A", hover_color="#552428",
+            font=("Microsoft JhengHei", 13),
+            command=self._cancel,
+        ).pack(side="right", padx=8, pady=9)
+
+        ctk.CTkButton(
+            bot, text="✔  確認儲存", width=130, height=36,
+            fg_color="#183A1A", hover_color="#245528",
+            font=("Microsoft JhengHei", 13, "bold"),
+            command=self._save,
+        ).pack(side="right", padx=(0, 4), pady=9)
+
+    def _stop_audio(self):
+        try:
+            import sounddevice as sd
+            sd.stop()
+        except Exception:
+            pass
+
+    def _cancel(self):
+        self._stop_audio()
+        self.destroy()
+
+    def _save(self):
+        self._stop_audio()
+        ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_path = self.srt_path.parent / f"{self.srt_path.stem}_edited_{ts}.srt"
+        with open(out_path, "w", encoding="utf-8") as f:
+            for i, row in enumerate(self._rows, 1):
+                start = row["start"].get()
+                end   = row["end"].get()
+                text  = row["text"].get().strip()
+                spk   = row["speaker"].get()
+                if self.has_speakers and spk and spk in self._spk_name_vars:
+                    display = self._spk_name_vars[spk].get() or spk
+                    prefix  = f"{display}："
+                else:
+                    prefix = ""
+                f.write(f"{i}\n{start} --> {end}\n{prefix}{text}\n\n")
+        messagebox.showinfo("已儲存", f"字幕已儲存至：\n{out_path}", parent=self)
+        self.destroy()
+
+
 class App(ctk.CTk):
 
     def __init__(self):
@@ -648,12 +1053,16 @@ class App(ctk.CTk):
         self._model_dir: Path | None         = None   # 使用者選定的模型路徑
         self._lang_list: list[str]           = []     # 載入後填入
         self._selected_language: str | None  = None   # 目前選定的語系
+        self._settings: dict                 = {}     # 目前生效的設定
+        self._all_devices: dict              = {}     # 偵測到的所有裝置
         self._file_hint: str | None          = None   # 音檔轉字幕 hint
         self._file_diarize: bool             = False  # 說話者分離開關
         self._file_n_speakers: int | None    = None   # 指定說話者人數（None=自動）
+        self._sl_process: subprocess.Popen | None = None  # Streamlit 子程序
+        self._sl_port: int                   = 8501   # Streamlit 監聽連接埠
 
         self._build_ui()
-        self._detect_ov_devices()
+        self._detect_all_devices()
         self._refresh_audio_devices()   # 音訊裝置獨立初始化，不依賴模型載入
         threading.Thread(target=self._startup_check, daemon=True).start()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -730,9 +1139,11 @@ class App(ctk.CTk):
         self.tabs.pack(fill="both", expand=True, padx=10, pady=(8, 10))
         self.tabs.add("  音檔轉字幕  ")
         self.tabs.add("  即時轉換  ")
+        self.tabs.add("  服務設定  ")
 
         self._build_file_tab(self.tabs.tab("  音檔轉字幕  "))
         self._build_rt_tab(self.tabs.tab("  即時轉換  "))
+        self._build_service_tab(self.tabs.tab("  服務設定  "))
 
     # ── 音檔轉字幕 tab ─────────────────────────────────
 
@@ -769,6 +1180,14 @@ class App(ctk.CTk):
             command=lambda: os.startfile(str(SRT_DIR)),
         )
         self.open_dir_btn.pack(side="left")
+
+        self.verify_btn = ctk.CTkButton(
+            row2, text="🔍  字幕驗證", width=120, height=36,
+            font=FONT_BODY, state="disabled",
+            fg_color="#1A3050", hover_color="#265080",
+            command=self._on_verify,
+        )
+        self.verify_btn.pack(side="left", padx=(8, 0))
 
         self._diarize_var = ctk.BooleanVar(value=False)
         self.diarize_chk = ctk.CTkCheckBox(
@@ -940,6 +1359,267 @@ class App(ctk.CTk):
             font=FONT_BODY, command=self._on_rt_save,
         ).pack(side="left")
 
+    # ── Streamlit 服務設定 tab ─────────────────────────
+
+    def _build_service_tab(self, parent):
+        # 說明區
+        ctk.CTkLabel(
+            parent,
+            text="🌐 Streamlit 網頁服務",
+            font=("Microsoft JhengHei", 14, "bold"),
+            anchor="w",
+        ).pack(fill="x", padx=12, pady=(14, 2))
+        ctk.CTkLabel(
+            parent,
+            text="在本機啟動網頁版前端，啟動後點選按鈕開啟瀏覽器，不會自動彈出視窗。",
+            font=FONT_BODY, text_color="#AAAAAA", anchor="w",
+        ).pack(fill="x", padx=12, pady=(0, 10))
+
+        # 狀態列
+        status_row = ctk.CTkFrame(parent, fg_color="transparent")
+        status_row.pack(fill="x", padx=12, pady=(0, 4))
+        self._sl_status_dot = ctk.CTkLabel(
+            status_row, text="⚫", font=FONT_BODY, width=28, anchor="w"
+        )
+        self._sl_status_dot.pack(side="left")
+        self._sl_status_lbl = ctk.CTkLabel(
+            status_row, text="服務未啟動", font=FONT_BODY, anchor="w"
+        )
+        self._sl_status_lbl.pack(side="left")
+
+        # 連接埠列
+        port_row = ctk.CTkFrame(parent, fg_color="transparent")
+        port_row.pack(fill="x", padx=12, pady=4)
+        ctk.CTkLabel(port_row, text="連接埠：", font=FONT_BODY).pack(side="left")
+        self._sl_port_var = ctk.StringVar(value="8501")
+        self._sl_port_entry = ctk.CTkEntry(
+            port_row, textvariable=self._sl_port_var,
+            width=80, height=32, font=FONT_BODY,
+        )
+        self._sl_port_entry.pack(side="left", padx=(4, 0))
+
+        # 控制按鈕列
+        btn_row = ctk.CTkFrame(parent, fg_color="transparent")
+        btn_row.pack(fill="x", padx=12, pady=4)
+        self._sl_start_btn = ctk.CTkButton(
+            btn_row, text="▶  啟動服務",
+            width=120, height=34, font=FONT_BODY,
+            command=self._on_sl_start,
+        )
+        self._sl_start_btn.pack(side="left", padx=(0, 8))
+        self._sl_stop_btn = ctk.CTkButton(
+            btn_row, text="■  停止服務",
+            width=120, height=34, font=FONT_BODY,
+            fg_color="gray35", hover_color="gray25",
+            state="disabled",
+            command=self._on_sl_stop,
+        )
+        self._sl_stop_btn.pack(side="left")
+
+        # URL 列
+        url_row = ctk.CTkFrame(parent, fg_color="transparent")
+        url_row.pack(fill="x", padx=12, pady=(6, 2))
+        ctk.CTkLabel(url_row, text="連線位址：", font=FONT_BODY).pack(side="left")
+        self._sl_url_lbl = ctk.CTkLabel(
+            url_row, text="—", font=FONT_BODY,
+            text_color="#7dd3fc", cursor="hand2",
+        )
+        self._sl_url_lbl.pack(side="left", padx=(4, 10))
+        self._sl_url_lbl.bind("<Button-1>", lambda _: self._on_sl_open())
+        self._sl_open_btn = ctk.CTkButton(
+            url_row, text="🌐  開啟瀏覽器",
+            width=130, height=30, font=FONT_BODY,
+            state="disabled", command=self._on_sl_open,
+        )
+        self._sl_open_btn.pack(side="left")
+        self._sl_copy_btn = ctk.CTkButton(
+            url_row, text="📋  複製",
+            width=80, height=30, font=FONT_BODY,
+            state="disabled", command=self._on_sl_copy_url,
+        )
+        self._sl_copy_btn.pack(side="left", padx=(6, 0))
+
+        # 日誌
+        ctk.CTkLabel(
+            parent, text="服務日誌：",
+            font=FONT_BODY, text_color="#AAAAAA", anchor="w",
+        ).pack(fill="x", padx=12, pady=(10, 2))
+        self._sl_log_box = ctk.CTkTextbox(
+            parent, font=("Consolas", 11), state="disabled", height=160,
+        )
+        self._sl_log_box.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+    # ── Streamlit 服務輔助方法 ──────────────────────────
+
+    def _get_python_exe(self) -> Path:
+        """取得可執行的 Python 解譯器路徑。
+        EXE 模式下，PyInstaller bootloader 本身不可做 `python -m`，
+        因此在 BASE_DIR/_python/ 尋找 python.exe（由 build.bat 複製進來）。
+
+        python.exe 放在 _python\ 子目錄（非 EXE 所在根目錄）的原因：
+        若 python3XX.dll 與 QwenASR.exe 同層，Windows DLL loader 會同時載入
+        兩份不同 Python DLL（PyInstaller 的 _internal\ 版本 + venv 版本），
+        造成 DLL 衝突與每段辨識時的視窗閃爍問題。
+        """
+        if getattr(sys, "frozen", False):
+            for cand in [
+                BASE_DIR / "_python" / "python.exe",   # 新版 build.bat 位置（避免 DLL 衝突）
+                BASE_DIR / "python.exe",               # 舊版相容（build 後手動放置的情況）
+                BASE_DIR / "_internal" / "python.exe",
+            ]:
+                if cand.exists():
+                    return cand
+            # 找不到時回傳 EXE 本身（會失敗，但讓錯誤訊息清楚）
+            return Path(sys.executable)
+        return Path(sys.executable)
+
+    def _on_sl_start(self):
+        """啟動 Streamlit 服務（子程序）。"""
+        sl_script = BASE_DIR / "streamlit_app.py"
+        if not sl_script.exists():
+            self._sl_append_log("❌ 找不到 streamlit_app.py，無法啟動服務")
+            return
+
+        try:
+            port = int(self._sl_port_var.get())
+        except ValueError:
+            port = 8501
+            self._sl_port_var.set("8501")
+        self._sl_port = port
+
+        py_exe = self._get_python_exe()
+        _NO_WIN = 0x08000000 if sys.platform == "win32" else 0
+        cmd = [
+            str(py_exe), "-m", "streamlit", "run",
+            str(sl_script),
+            "--server.port",              str(port),
+            "--server.headless",          "true",
+            "--browser.gatherUsageStats", "false",
+        ]
+        self._sl_append_log(
+            f"▶ 啟動：streamlit run streamlit_app.py --server.port {port}"
+        )
+        self._sl_append_log("⏳ 等待 Streamlit 初始化（通常需要 5–15 秒）…")
+        try:
+            self._sl_process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                cwd=str(BASE_DIR),       # 確保工作目錄正確
+                creationflags=_NO_WIN,
+            )
+        except Exception as e:
+            self._sl_append_log(f"❌ 啟動失敗：{e}")
+            return
+
+        # 顯示「啟動中」狀態（黃燈），等解析到 "Local URL:" 才標記就緒
+        self._sl_status_dot.configure(text="🟡")
+        self._sl_status_lbl.configure(text="啟動中…")
+        self._sl_start_btn.configure(state="disabled")
+        self._sl_stop_btn.configure(state="normal")
+        self._sl_port_entry.configure(state="disabled")
+
+        threading.Thread(target=self._sl_log_reader, daemon=True).start()
+        threading.Thread(target=self._sl_monitor,    daemon=True).start()
+
+    def _on_sl_stop(self):
+        """停止 Streamlit 服務。"""
+        proc, self._sl_process = self._sl_process, None
+        if proc:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        self._sl_on_stopped()
+        self._sl_append_log("■ 服務已手動停止")
+
+    def _on_sl_open(self):
+        """在預設瀏覽器中開啟 Streamlit 網頁。"""
+        url = self._sl_url_lbl.cget("text")
+        if url and url != "—":
+            webbrowser.open(url)
+        else:
+            webbrowser.open(f"http://localhost:{self._sl_port}")
+
+    def _on_sl_copy_url(self):
+        """複製 URL 到剪貼簿。"""
+        url = self._sl_url_lbl.cget("text")
+        if not url or url == "—":
+            url = f"http://localhost:{self._sl_port}"
+        self.clipboard_clear()
+        self.clipboard_append(url)
+        self._sl_copy_btn.configure(text="✅  已複製")
+        self.after(2000, lambda: self._sl_copy_btn.configure(text="📋  複製"))
+
+    def _sl_append_log(self, text: str):
+        """（可跨執行緒）在服務日誌框末尾追加一行。"""
+        def _do():
+            ts = datetime.now().strftime("%H:%M:%S")
+            self._sl_log_box.configure(state="normal")
+            self._sl_log_box.insert("end", f"[{ts}] {text}\n")
+            self._sl_log_box.see("end")
+            self._sl_log_box.configure(state="disabled")
+        self.after(0, _do)
+
+    def _sl_log_reader(self):
+        """背景：讀取 Streamlit stdout；解析 'Local URL:' 偵測就緒。"""
+        _ANSI = re.compile(r"\x1b\[[0-9;]*[mGKHF]")
+        proc   = self._sl_process
+        if not proc or not proc.stdout:
+            return
+
+        for raw in proc.stdout:
+            line = _ANSI.sub("", raw).rstrip()
+            if not line:
+                continue
+            self._sl_append_log(line)
+
+            # Streamlit 就緒訊號（含 URL）
+            # 典型格式：  Local URL: http://localhost:8501
+            if "Local URL:" in line:
+                url = line.split("Local URL:")[-1].strip()
+                self.after(0, lambda u=url: self._sl_on_ready(u))
+
+        # stdout 關閉代表程序已結束
+        if self._sl_process is not None:   # 非手動停止
+            self.after(0, self._sl_on_stopped)
+
+    def _sl_monitor(self):
+        """背景：等待程序退出（確保 stdout 讀完後狀態正確同步）。"""
+        proc = self._sl_process
+        if proc:
+            proc.wait()
+        if self._sl_process is not None:   # 非手動停止
+            self._sl_process = None
+            self.after(0, self._sl_on_stopped)
+
+    def _sl_on_ready(self, url: str):
+        """Streamlit 已就緒 → 更新 UI（主執行緒）。"""
+        self._sl_status_dot.configure(text="🟢")
+        self._sl_status_lbl.configure(text="服務就緒")
+        self._sl_url_lbl.configure(text=url)
+        self._sl_open_btn.configure(state="normal")
+        self._sl_copy_btn.configure(state="normal")
+        self._sl_append_log(f"✅ 服務就緒：{url}")
+
+    def _sl_on_stopped(self):
+        """程序退出後重設 UI（主執行緒）。"""
+        self._sl_status_dot.configure(text="⚫")
+        self._sl_status_lbl.configure(text="服務未啟動")
+        self._sl_url_lbl.configure(text="—")
+        self._sl_start_btn.configure(state="normal")
+        self._sl_stop_btn.configure(state="disabled")
+        self._sl_open_btn.configure(state="disabled")
+        self._sl_copy_btn.configure(state="disabled")
+        self._sl_port_entry.configure(state="normal")
+
     # ── 模型載入 ───────────────────────────────────────
 
     # ── 說話者分離 UI 輔助 ───────────────────────────────────────────
@@ -1016,14 +1696,70 @@ class App(ctk.CTk):
         if self.model_var.get() not in available:
             self.model_var.set(available[0])
 
-    def _detect_ov_devices(self):
+    def _refresh_model_combo_from_settings(self, settings: dict):
+        """主執行緒：依 settings.backend 顯示對應的模型 combo 狀態。"""
+        backend = settings.get("backend", "openvino")
+        if backend == "chatllm":
+            self.model_combo.configure(
+                values=["1.7B Q8_0 (Vulkan GPU)"], state="disabled"
+            )
+            self.model_var.set("1.7B Q8_0 (Vulkan GPU)")
+        else:
+            sz = settings.get("cpu_model_size", "0.6B")
+            self.model_combo.configure(
+                values=["Qwen3-ASR-0.6B", "Qwen3-ASR-1.7B INT8"],
+                state="readonly",
+            )
+            self.model_var.set(
+                "Qwen3-ASR-1.7B INT8" if sz == "1.7B" else "Qwen3-ASR-0.6B"
+            )
+
+    def _detect_all_devices(self):
+        """同時偵測 OpenVINO（CPU / Intel iGPU）與 Vulkan（NVIDIA / AMD）裝置。
+        結果儲存在 self._all_devices，並更新 device_combo 選單。
         """
-        固定使用 CPU。
-        OpenVINO GPU 外掛針對 Intel GPU 優化，NVIDIA OpenCL 不相容。
-        如需 Intel iGPU 支援，請安裝 Intel GPU 驅動後修改此處。
-        """
-        self.device_combo.configure(values=["CPU"], state="readonly")
-        self.device_var.set("CPU")
+        # ── OpenVINO 裝置 ───────────────────────────────────────────────
+        ov_labels = ["CPU"]
+        igpu_list: list[dict] = []
+        try:
+            import openvino as ov
+            core = ov.Core()
+            for d in core.available_devices:
+                if not d.startswith("GPU"):
+                    continue
+                try:
+                    name = core.get_property(d, "FULL_DEVICE_NAME")
+                except Exception:
+                    name = d
+                if "Intel" in name:
+                    label = f"{d} ({name})"
+                    ov_labels.append(label)
+                    igpu_list.append({"device": d, "name": name, "label": label})
+        except Exception:
+            pass
+
+        # ── Vulkan 裝置（NVIDIA / AMD）──────────────────────────────────
+        nvidia_amd: list[dict] = []
+        if _CHATLLM_AVAILABLE:
+            chatllm_dir = str(_CHATLLM_DIR)
+            if not _CHATLLM_DIR.exists():
+                # 嘗試 chatllmtest 目錄（開發模式）
+                chatllm_dir = str(BASE_DIR / "chatllmtest" / "chatllm_win_x64" / "bin")
+            nvidia_amd = detect_vulkan_devices(chatllm_dir)
+
+        self._all_devices = {
+            "cpu":       True,
+            "igpu":      igpu_list,
+            "nvidia_amd": nvidia_amd,
+        }
+
+        # ── 更新 device_combo ────────────────────────────────────────────
+        all_labels = list(ov_labels)
+        for dev in nvidia_amd:
+            all_labels.append(f"GPU:{dev['id']} ({dev['name']}) [Vulkan]")
+
+        self.device_combo.configure(values=all_labels)
+        self.device_var.set(all_labels[0])
 
     # ── 設定檔讀寫（記住模型路徑）──────────────────────────────────────
 
@@ -1036,13 +1772,39 @@ class App(ctk.CTk):
             pass
         return {}
 
-    def _save_settings(self, model_dir: Path):
+    def _save_settings(self, settings: dict):
+        """儲存完整設定 dict 到 settings.json。
+        schema:
+          backend       : "openvino" | "chatllm"
+          device        : "CPU" | "GPU.0 (Intel UHD...)" | "GPU:0 (NVIDIA...) [Vulkan]"
+          cpu_model_size: "0.6B" | "1.7B"
+          model_dir     : OpenVINO 模型資料夾
+          model_path    : chatllm .bin 模型路徑（chatllm 後端用）
+          chatllm_dir   : chatllm DLL 目錄
+        """
         try:
-            data = {"model_dir": str(model_dir)}
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+                json.dump(settings, f, indent=2, ensure_ascii=False)
         except Exception:
             pass
+
+    def _settings_valid(self, s: dict) -> bool:
+        """檢查設定是否足夠完整（不需要重新引導）。"""
+        if not s:
+            return False
+        backend = s.get("backend", "")
+        if backend == "chatllm":
+            mdl  = s.get("model_path", "") or s.get("gguf_path", "")
+            cdir = s.get("chatllm_dir", "")
+            return bool(mdl and cdir and Path(mdl).exists() and Path(cdir).exists())
+        elif backend == "openvino":
+            model_dir = s.get("model_dir", "")
+            if not model_dir:
+                return False
+            # 至少 0.6B 必須存在
+            from downloader import quick_check
+            return quick_check(Path(model_dir))
+        return False
 
     def _resolve_model_dir(self) -> Path | None:
         """
@@ -1061,190 +1823,375 @@ class App(ctk.CTk):
                 return p
         return None
 
-    # ── 啟動檢查：模型完整性 → 必要時下載 → 載入模型 ─────────────────
+    # ── 啟動檢查：設定有效 → 直接載入；否則 → 引導畫面 ────────────────
 
     def _startup_check(self):
-        """背景執行緒：確認模型路徑 → 下載（按使用者選擇）→ 載入。"""
-        from downloader import (quick_check, download_all,
-                                quick_check_1p7b, download_1p7b,
-                                quick_check_diarization, download_diarization)
+        """背景執行緒：確認設定有效性 → 必要時顯示引導畫面 → 載入模型。"""
+        settings = self._load_settings()
 
-        # 1. 解析模型路徑；若找不到，顯示路徑 + 模型選擇對話框
-        download_sel = {"0.6B": True, "1.7B": False, "diar": False}
-        model_dir = self._resolve_model_dir()
-        if model_dir is None:
-            chosen = [None, None]   # [path, download_sel_dict]
+        if not self._settings_valid(settings):
+            # 顯示引導畫面（主執行緒）
+            chosen = [None]
             evt = threading.Event()
-            self.after(0, lambda: self._show_model_path_dialog(chosen, evt))
+            self.after(0, lambda: self._run_onboarding(chosen, evt))
             evt.wait()
+
             if chosen[0] is None:
-                self.after(0, lambda: self._set_status("⚠ 已取消，模型未載入"))
-                return
-            model_dir = chosen[0]
-            if chosen[1] is not None:
-                download_sel = chosen[1]
-            self._save_settings(model_dir)
+                # 使用者取消 → 嘗試 CPU + 0.6B 預設值
+                default_dir = _DEFAULT_MODEL_DIR
+                from downloader import quick_check
+                if quick_check(default_dir):
+                    settings = {
+                        "backend":        "openvino",
+                        "device":         "CPU",
+                        "cpu_model_size": "0.6B",
+                        "model_dir":      str(default_dir),
+                    }
+                else:
+                    self.after(0, lambda: self._set_status("⚠ 已取消，模型未載入"))
+                    return
+            else:
+                settings = chosen[0]
 
-        self._model_dir = model_dir
+            self._save_settings(settings)
 
-        # 2. 下載 0.6B 基礎模型（必要）
-        if not quick_check(model_dir):
-            self.after(0, self._show_dl_bar)
-            self._set_status("⬇ 下載 0.6B 模型中…")
-            try:
-                download_all(model_dir, progress_cb=self._on_dl_progress)
-            except Exception as e:
-                msg = str(e)
-                self.after(0, self._hide_dl_bar)
-                self.after(0, lambda: messagebox.showerror(
-                    "下載失敗",
-                    f"模型下載失敗：\n{msg}\n\n"
-                    "請確認網路連線後重新啟動程式。"
-                ))
-                self.after(0, lambda: self._set_status("❌ 下載失敗"))
-                return
-            self.after(0, self._hide_dl_bar)
+        self._settings = settings
 
-        # 3. 下載 1.7B 模型（若使用者在對話框勾選）
-        if download_sel.get("1.7B") and not quick_check_1p7b(model_dir):
-            self.after(0, self._show_dl_bar)
-            self._set_status("⬇ 下載 1.7B 模型（約 4.3 GB）…")
-            try:
-                download_1p7b(model_dir, progress_cb=self._on_dl_progress)
-                self.after(0, self._hide_dl_bar)
-            except Exception as e:
-                msg = str(e)
-                self.after(0, self._hide_dl_bar)
-                self.after(0, lambda: messagebox.showwarning(
-                    "1.7B 下載警告",
-                    f"1.7B 模型下載失敗：\n{msg}\n\n"
-                    "稍後可在下拉選單選擇 1.7B 後點「重新載入」重試。",
-                ))
+        # 同步 device_combo 到已儲存的裝置
+        saved_dev = settings.get("device", "CPU")
+        def _sync_device():
+            vals = self.device_combo.cget("values")
+            if saved_dev in vals:
+                self.device_var.set(saved_dev)
+        self.after(0, _sync_device)
 
-        # 4. 下載說話者分離模型（若使用者在對話框勾選）
-        if download_sel.get("diar") and not quick_check_diarization(model_dir):
-            self.after(0, self._show_dl_bar)
-            self._set_status("⬇ 下載說話者分離模型…")
-            try:
-                download_diarization(
-                    model_dir / "diarization",
-                    progress_cb=self._on_dl_progress,
-                )
-                self.after(0, self._hide_dl_bar)
-            except Exception as e:
-                msg = str(e)
-                self.after(0, self._hide_dl_bar)
-                self.after(0, lambda: messagebox.showwarning(
-                    "說話者分離下載警告",
-                    f"說話者分離模型下載失敗：\n{msg}\n\n"
-                    "稍後可透過「重新載入」重試。",
-                ))
+        # 更新模型選單
+        self.after(0, lambda: self._refresh_model_combo_from_settings(settings))
 
-        # 更新模型選單（固定顯示全部選項）
-        self.after(0, lambda d=model_dir: self._refresh_model_combo(d))
-
-        # 5. 載入模型
         self._set_status("⏳ 模型載入中…")
         self._load_models()
 
-    def _show_model_path_dialog(self, chosen: list, evt: threading.Event):
-        """主執行緒：顯示模型路徑 + 下載選項對話框。
-        chosen[0] = 選定路徑（Path），chosen[1] = 下載選項 dict。
+    # ── 引導畫面：硬體偵測 + 後端選擇 + 下載 ────────────────────────────
+
+    def _run_onboarding(self, chosen: list, evt: threading.Event):
+        """主執行緒：顯示初始設定引導畫面（modal）。
+        chosen[0] = 選定設定 dict（或 None 表示取消）。
         """
         dlg = ctk.CTkToplevel(self)
-        dlg.title("選擇模型存放路徑")
+        dlg.title("QwenASR 初始設定")
         dlg.resizable(False, False)
         dlg.grab_set()
         dlg.focus_set()
 
         self.update_idletasks()
-        x = self.winfo_x() + (self.winfo_width()  - 500) // 2
-        y = self.winfo_y() + (self.winfo_height() - 380) // 2
-        dlg.geometry(f"500x380+{x}+{y}")
+        scr_h  = dlg.winfo_screenheight()
+        dlg_w  = 640
+        dlg_h  = min(scr_h - 120, 660)   # 最多 660，低解析度自動縮短
+        x = self.winfo_x() + (self.winfo_width()  - dlg_w) // 2
+        y = max(40, self.winfo_y() + (self.winfo_height() - dlg_h) // 2)
+        dlg.geometry(f"{dlg_w}x{dlg_h}+{x}+{y}")
+
+        # ══ 底部按鈕列（先 pack → 永遠可見，不被內容擠走）══════════════
+        bottom_bar = ctk.CTkFrame(dlg, fg_color="#252525", height=72)
+        bottom_bar.pack(side="bottom", fill="x")
+        bottom_bar.pack_propagate(False)
+
+        # 分隔線
+        ctk.CTkFrame(dlg, fg_color="#3A3A3A", height=1).pack(
+            side="bottom", fill="x"
+        )
+
+        confirm_btn = ctk.CTkButton(
+            bottom_bar,
+            text="✔  確認並開始下載",
+            width=200, height=44,
+            font=("Microsoft JhengHei", 14, "bold"),
+            corner_radius=8,
+        )
+        confirm_btn.pack(side="left", padx=(24, 10), pady=14)
+
+        ctk.CTkButton(
+            bottom_bar,
+            text="取消",
+            width=110, height=44,
+            font=("Microsoft JhengHei", 14),
+            fg_color="gray35", hover_color="gray25",
+            corner_radius=8,
+            command=lambda: _cancel_onboarding(),
+        ).pack(side="left", padx=0, pady=14)
+
+        # ══ 可捲動內容區（低解析度也能捲動到底）═════════════════════════
+        scroll = ctk.CTkScrollableFrame(dlg, fg_color="transparent")
+        scroll.pack(fill="both", expand=True)
+
+        # ── 標題 ──────────────────────────────────────────────────────
+        ctk.CTkLabel(
+            scroll, text="🎙  QwenASR 初始設定",
+            font=("Microsoft JhengHei", 18, "bold"), anchor="w",
+        ).pack(fill="x", padx=24, pady=(20, 4))
 
         ctk.CTkLabel(
-            dlg,
-            text="找不到 Qwen3 ASR 模型\n請選擇模型存放資料夾，並勾選要下載的模型",
-            justify="left",
-        ).pack(anchor="w", padx=20, pady=(18, 8))
+            scroll, text="首次啟動需要選擇推理方式並下載對應模型。",
+            font=FONT_BODY, text_color="#AAAAAA", anchor="w",
+        ).pack(fill="x", padx=24, pady=(0, 12))
 
-        # ── 路徑選擇 ──────────────────────────────────────────────────
-        _saved = self._load_settings().get("model_dir")
-        path_var = ctk.StringVar(value=_saved if _saved else str(_DEFAULT_MODEL_DIR))
+        # ── 偵測到的裝置 ──────────────────────────────────────────────
+        dev_frame = ctk.CTkFrame(scroll, fg_color="#1E1E1E", corner_radius=8)
+        dev_frame.pack(fill="x", padx=24, pady=(0, 14))
 
-        row = ctk.CTkFrame(dlg, fg_color="transparent")
-        row.pack(fill="x", padx=20)
+        ctk.CTkLabel(
+            dev_frame, text="偵測到的裝置", font=FONT_BODY,
+            text_color="#AAAAAA", anchor="w",
+        ).pack(anchor="w", padx=12, pady=(8, 2))
 
-        entry = ctk.CTkEntry(row, textvariable=path_var, width=340)
-        entry.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(dev_frame, text="✅ CPU（可用）", font=FONT_BODY, anchor="w").pack(
+            anchor="w", padx=20, pady=2
+        )
+        igpu_list   = self._all_devices.get("igpu", [])
+        nvidia_list = self._all_devices.get("nvidia_amd", [])
+        for g in igpu_list:
+            ctk.CTkLabel(
+                dev_frame, text=f"✅ Intel GPU：{g['name']}", font=FONT_BODY, anchor="w",
+            ).pack(anchor="w", padx=20, pady=2)
+        for g in nvidia_list:
+            vram_gb = g['vram_free'] / 1_073_741_824
+            ctk.CTkLabel(
+                dev_frame,
+                text=f"✅ GPU：{g['name']}（可用 VRAM {vram_gb:.1f} GB，Vulkan）",
+                font=FONT_BODY, anchor="w",
+            ).pack(anchor="w", padx=20, pady=2)
+        if not igpu_list and not nvidia_list:
+            ctk.CTkLabel(
+                dev_frame, text="ℹ 未偵測到獨立 GPU，僅 CPU 推理可用",
+                font=FONT_BODY, text_color="#888888", anchor="w",
+            ).pack(anchor="w", padx=20, pady=2)
+        ctk.CTkLabel(dev_frame, text="").pack(pady=2)
 
-        def _browse():
+        # ── 後端選擇 ──────────────────────────────────────────────────
+        ctk.CTkLabel(
+            scroll, text="選擇推理方式：", font=FONT_BODY, anchor="w",
+        ).pack(fill="x", padx=24, pady=(0, 6))
+
+        backend_var = ctk.StringVar(value="openvino_cpu")
+        opt_frame   = ctk.CTkFrame(scroll, fg_color="transparent")
+        opt_frame.pack(fill="x", padx=24, pady=(0, 10))
+
+        # CPU 選項框
+        cpu_box = ctk.CTkFrame(opt_frame, fg_color="#1E1E1E", corner_radius=8)
+        cpu_box.pack(fill="x", pady=(0, 6))
+
+        ctk.CTkRadioButton(
+            cpu_box, text="CPU 推理（OpenVINO）",
+            variable=backend_var, value="openvino_cpu",
+            font=FONT_BODY,
+        ).pack(anchor="w", padx=12, pady=(10, 4))
+
+        size_frame = ctk.CTkFrame(cpu_box, fg_color="transparent")
+        size_frame.pack(fill="x", padx=32, pady=(0, 10))
+        size_var = ctk.StringVar(value="0.6B")
+        ctk.CTkRadioButton(
+            size_frame, text="0.6B 輕量（~1.2 GB，速度快）",
+            variable=size_var, value="0.6B", font=FONT_BODY,
+            command=lambda: backend_var.set("openvino_cpu"),
+        ).pack(side="left", padx=(0, 20))
+        ctk.CTkRadioButton(
+            size_frame, text="1.7B 高精度（~4.3 GB）",
+            variable=size_var, value="1.7B", font=FONT_BODY,
+            command=lambda: backend_var.set("openvino_cpu"),
+        ).pack(side="left")
+
+        # GPU 選項框（有 NVIDIA/AMD 才顯示）
+        if nvidia_list:
+            gpu_options = [f"GPU:{g['id']} ({g['name']}) [Vulkan]" for g in nvidia_list]
+            gpu_box = ctk.CTkFrame(opt_frame, fg_color="#1E1E1E", corner_radius=8)
+            gpu_box.pack(fill="x", pady=(0, 6))
+            gpu_var = ctk.StringVar(value=gpu_options[0] if gpu_options else "")
+            ctk.CTkRadioButton(
+                gpu_box, text="GPU 推理（Vulkan，速度最快）",
+                variable=backend_var, value="chatllm",
+                font=FONT_BODY,
+            ).pack(anchor="w", padx=12, pady=(10, 4))
+            for opt in gpu_options:
+                ctk.CTkRadioButton(
+                    gpu_box, text=f"  {opt}",
+                    variable=gpu_var, value=opt, font=FONT_BODY,
+                    command=lambda: backend_var.set("chatllm"),
+                ).pack(anchor="w", padx=32, pady=2)
+            ctk.CTkLabel(
+                gpu_box,
+                text="  1.7B .bin 格式（~2.3 GB），需先下載",
+                font=("Microsoft JhengHei", 11), text_color="#888888",
+            ).pack(anchor="w", padx=32, pady=(0, 10))
+        else:
+            gpu_var = ctk.StringVar(value="")
+
+        # ── 路徑設定（模型存放位置）────────────────────────────────────
+        path_frame = ctk.CTkFrame(scroll, fg_color="transparent")
+        path_frame.pack(fill="x", padx=24, pady=(0, 8))
+        ctk.CTkLabel(path_frame, text="模型存放位置：", font=FONT_BODY).pack(
+            side="left", padx=(0, 6)
+        )
+        saved_dir = self._load_settings().get("model_dir", str(_DEFAULT_MODEL_DIR))
+        path_var = ctk.StringVar(value=saved_dir)
+        ctk.CTkEntry(path_frame, textvariable=path_var, width=280, font=FONT_BODY).pack(
+            side="left"
+        )
+        def _browse_dir():
             d = filedialog.askdirectory(title="選擇模型存放資料夾", parent=dlg)
             if d:
                 path_var.set(d)
+        ctk.CTkButton(
+            path_frame, text="瀏覽…", width=70, font=FONT_BODY,
+            command=_browse_dir,
+        ).pack(side="left", padx=(6, 0))
 
-        ctk.CTkButton(row, text="瀏覽…", width=72, command=_browse).pack(side="left", padx=(6, 0))
+        # ── 下載進度條（平時隱藏）──────────────────────────────────────
+        prog_frame = ctk.CTkFrame(scroll, fg_color="transparent")
+        prog_frame.pack(fill="x", padx=24, pady=(0, 8))
+        onb_prog_lbl = ctk.CTkLabel(
+            prog_frame, text="", font=("Microsoft JhengHei", 11),
+            text_color="#AAAAAA", anchor="w",
+        )
+        onb_prog_lbl.pack(fill="x")
+        onb_bar = ctk.CTkProgressBar(prog_frame, height=10)
+        onb_bar.set(0)
+        onb_bar.pack(fill="x")
+        onb_bar.pack_forget()
+        onb_prog_lbl.pack_forget()
 
-        ctk.CTkLabel(
-            dlg,
-            text="若所選資料夾已有模型檔案，將直接使用，不會重複下載。",
-            font=ctk.CTkFont(size=11),
-            text_color="gray",
-        ).pack(anchor="w", padx=20, pady=(4, 0))
+        def _onb_progress(pct: float, msg: str):
+            def _do():
+                onb_bar.set(pct)
+                onb_prog_lbl.configure(text=msg)
+            dlg.after(0, _do)
+            self._set_status(f"⬇ {msg}")
 
-        # ── 模型選擇 ──────────────────────────────────────────────────
-        ctk.CTkLabel(
-            dlg, text="選擇要下載的模型：",
-            font=FONT_BODY, anchor="w",
-        ).pack(anchor="w", padx=20, pady=(16, 4))
+        def _show_onb_prog():
+            onb_prog_lbl.pack(fill="x")
+            onb_bar.pack(fill="x")
 
-        var_06b  = ctk.BooleanVar(value=True)
-        var_17b  = ctk.BooleanVar(value=False)
-        var_diar = ctk.BooleanVar(value=False)
+        def _hide_onb_prog():
+            onb_bar.pack_forget()
+            onb_prog_lbl.pack_forget()
 
-        chk_frame = ctk.CTkFrame(dlg, fg_color="transparent")
-        chk_frame.pack(fill="x", padx=32)
-
-        ctk.CTkCheckBox(
-            chk_frame,
-            text="Qwen3-ASR-0.6B         基礎語音辨識（必要，~1.2 GB）",
-            variable=var_06b, state="disabled", font=FONT_BODY,
-        ).pack(anchor="w", pady=4)
-        ctk.CTkCheckBox(
-            chk_frame,
-            text="Qwen3-ASR-1.7B INT8  高精度語音辨識（~4.3 GB）",
-            variable=var_17b, font=FONT_BODY,
-        ).pack(anchor="w", pady=4)
-        ctk.CTkCheckBox(
-            chk_frame,
-            text="說話者分離                   識別不同說話者（~32 MB）",
-            variable=var_diar, font=FONT_BODY,
-        ).pack(anchor="w", pady=4)
-
-        # ── 按鈕 ──────────────────────────────────────────────────────
-        btn_row = ctk.CTkFrame(dlg, fg_color="transparent")
-        btn_row.pack(pady=(18, 0))
-
-        def _confirm():
-            val = path_var.get().strip()
-            chosen[0] = Path(val) if val else None
-            chosen[1] = {
-                "0.6B": True,           # 0.6B 永遠下載
-                "1.7B": var_17b.get(),
-                "diar": var_diar.get(),
-            }
-            dlg.destroy()
-            evt.set()
-
-        def _cancel():
+        def _cancel_onboarding():
             chosen[0] = None
-            chosen[1] = None
             dlg.destroy()
             evt.set()
 
-        ctk.CTkButton(btn_row, text="確認並開始下載", width=130, command=_confirm).pack(side="left", padx=8)
-        ctk.CTkButton(btn_row, text="取消", width=80, fg_color="#555", command=_cancel).pack(side="left", padx=8)
-        dlg.protocol("WM_DELETE_WINDOW", _cancel)
+        def _do_download():
+            """背景執行緒：執行下載動作，完成後關閉引導畫面。"""
+            from downloader import (quick_check, download_all,
+                                    quick_check_1p7b, download_1p7b)
+
+            backend    = backend_var.get()
+            model_path = Path(path_var.get().strip())
+            model_path.mkdir(parents=True, exist_ok=True)
+
+            # 禁用按鈕
+            dlg.after(0, lambda: confirm_btn.configure(state="disabled", text="⏳  下載中…"))
+            dlg.after(0, _show_onb_prog)
+
+            try:
+                if backend == "chatllm":
+                    # 確保 VAD 存在（OpenVINO onboarding 才呼叫 download_all；
+                    # chatllm 路徑需要另外確認）
+                    vad_dest = _DEFAULT_MODEL_DIR / "silero_vad_v4.onnx"
+                    if not vad_dest.exists():
+                        self._set_status("⬇ 下載 VAD 模型…")
+                        from downloader import _download_file, _VAD_URL
+                        _DEFAULT_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+                        _download_file(_VAD_URL, vad_dest)
+
+                    # 下載 chatllm .bin 模型（ModelScope）
+                    bin_dest = _BIN_PATH
+                    bin_dest.parent.mkdir(parents=True, exist_ok=True)
+                    if not bin_dest.exists():
+                        self._set_status("⬇ 下載 chatllm 模型（~2.3 GB）…")
+                        url = ("https://huggingface.co/dseditor/Collection"
+                               "/resolve/main/qwen3-asr-1.7b.bin")
+
+                        def _dl_bin():
+                            import urllib.request
+                            req = urllib.request.Request(
+                                url,
+                                headers={"User-Agent": "Mozilla/5.0 (compatible; QwenASR)"}
+                            )
+                            with urllib.request.urlopen(req) as resp, \
+                                 open(str(bin_dest) + ".tmp", "wb") as out:
+                                total = int(resp.headers.get("Content-Length", 0))
+                                done  = 0
+                                while True:
+                                    block = resp.read(65536)
+                                    if not block:
+                                        break
+                                    out.write(block)
+                                    done += len(block)
+                                    if total > 0:
+                                        pct = done / total
+                                        mb  = done / 1_048_576
+                                        tmb = total / 1_048_576
+                                        dlg.after(0, lambda p=pct, m=mb, t=tmb:
+                                            _onb_progress(p, f"下載模型 {m:.0f} / {t:.0f} MB"))
+                            import os
+                            os.replace(str(bin_dest) + ".tmp", str(bin_dest))
+                        _dl_bin()
+
+                    # chatllm_dir：優先 chatllm/，fallback chatllmtest
+                    cl_dir = _CHATLLM_DIR if _CHATLLM_DIR.exists() else \
+                             BASE_DIR / "chatllmtest" / "chatllm_win_x64" / "bin"
+
+                    # 選取的 GPU device
+                    gpu_label = gpu_var.get()   # e.g. "GPU:0 (NVIDIA...) [Vulkan]"
+
+                    final_settings = {
+                        "backend":      "chatllm",
+                        "device":       gpu_label,
+                        "model_dir":    str(model_path),
+                        "model_path":   str(_BIN_PATH),
+                        "chatllm_dir":  str(cl_dir),
+                    }
+
+                else:  # openvino_cpu
+                    sz = size_var.get()   # "0.6B" | "1.7B"
+                    # 下載 0.6B（必要）
+                    if not quick_check(model_path):
+                        self._set_status("⬇ 下載 0.6B 模型…")
+                        download_all(model_path, progress_cb=_onb_progress)
+
+                    # 下載 1.7B（若選擇）
+                    if sz == "1.7B" and not quick_check_1p7b(model_path):
+                        self._set_status("⬇ 下載 1.7B 模型（~4.3 GB）…")
+                        download_1p7b(model_path, progress_cb=_onb_progress)
+
+                    final_settings = {
+                        "backend":        "openvino",
+                        "device":         "CPU",
+                        "cpu_model_size": sz,
+                        "model_dir":      str(model_path),
+                    }
+
+                dlg.after(0, lambda: _onb_progress(1.0, "下載完成！"))
+                dlg.after(0, _hide_onb_prog)
+                chosen[0] = final_settings
+                dlg.after(0, dlg.destroy)
+                evt.set()
+
+            except Exception as e:
+                err = str(e)
+                dlg.after(0, _hide_onb_prog)
+                dlg.after(0, lambda: confirm_btn.configure(
+                    state="normal", text="✔  確認並開始下載"
+                ))
+                dlg.after(0, lambda: messagebox.showerror(
+                    "下載失敗", f"下載失敗：\n{err}\n\n請確認網路連線後重試。", parent=dlg
+                ))
+
+        confirm_btn.configure(command=lambda: threading.Thread(
+            target=_do_download, daemon=True,
+        ).start())
+
+        dlg.protocol("WM_DELETE_WINDOW", _cancel_onboarding)
 
     def _on_dl_progress(self, pct: float, msg: str):
         self.after(0, lambda: self.dl_bar.set(pct))
@@ -1258,64 +2205,178 @@ class App(ctk.CTk):
 
     def _load_models(self):
         import gc
-        device    = self.device_var.get()
-        model_sel = self.model_var.get()
-        # 主動釋放舊引擎佔用的記憶體（OV 編譯模型可能達 3+ GB）
-        self.engine.audio_enc  = None
-        self.engine.embedder   = None
-        self.engine.dec_req    = None
-        if hasattr(self.engine, "pf_model"):
-            self.engine.pf_model = None
-            self.engine.dc_model = None
-        self.engine.vad_sess   = None
+
+        # ── 釋放舊引擎記憶體 ───────────────────────────────────────────
+        for attr in ("audio_enc", "embedder", "dec_req", "vad_sess",
+                     "pf_model", "dc_model", "_llm"):
+            if hasattr(self.engine, attr):
+                setattr(self.engine, attr, None)
         gc.collect()
 
-        # ── 1.7B 按需下載 ──────────────────────────────────────────────
-        if "1.7B" in model_sel and self._model_dir:
-            from downloader import quick_check_1p7b, download_1p7b
-            if not quick_check_1p7b(self._model_dir):
+        # ── 讀取設定：先用儲存的，再 fallback 至 UI 選擇 ───────────────
+        settings       = self._settings or self._load_settings()
+        backend        = settings.get("backend", "openvino")
+        device_label   = settings.get("device", self.device_var.get())
+        # 解析 OV 裝置名（如 "GPU.0 (Intel...)" → "GPU.0"）
+        ov_device      = device_label.split(" (")[0].split(" [")[0]
+
+        if backend == "chatllm":
+            # ── chatllm / Vulkan 路線 ──────────────────────────────────
+            if not _CHATLLM_AVAILABLE:
+                self.after(0, lambda: self._on_models_failed(
+                    "chatllm", "chatllm_engine 無法載入，請確認 chatllm/ 目錄"
+                ))
+                return
+
+            # 向下相容：新 key=model_path，舊 key=gguf_path
+            _saved_mdl  = settings.get("model_path") or settings.get("gguf_path") or str(_BIN_PATH)
+            model_path  = Path(_saved_mdl)
+            chatllm_dir = Path(settings.get("chatllm_dir", str(_CHATLLM_DIR)))
+
+            # chatllm .bin 是否存在
+            if not model_path.exists():
                 self.after(0, self._show_dl_bar)
-                self._set_status("⬇ 下載 1.7B 模型（約 4.3 GB）…")
+                self._set_status("⬇ 下載 chatllm 模型（~2.3 GB）…")
                 try:
-                    download_1p7b(self._model_dir, progress_cb=self._on_dl_progress)
+                    import urllib.request
+                    url = ("https://huggingface.co/dseditor/Collection"
+                           "/resolve/main/qwen3-asr-1.7b.bin")
+                    model_path.parent.mkdir(parents=True, exist_ok=True)
+                    req = urllib.request.Request(
+                        url, headers={"User-Agent": "Mozilla/5.0 (compatible; QwenASR)"}
+                    )
+                    with urllib.request.urlopen(req) as resp, \
+                         open(str(model_path) + ".tmp", "wb") as out:
+                        total = int(resp.headers.get("Content-Length", 0))
+                        done  = 0
+                        while True:
+                            block = resp.read(65536)
+                            if not block:
+                                break
+                            out.write(block)
+                            done += len(block)
+                            if total > 0:
+                                self._on_dl_progress(done / total,
+                                    f"模型 {done/1_048_576:.0f}/{total/1_048_576:.0f} MB")
+                    import os as _os
+                    _os.replace(str(model_path) + ".tmp", str(model_path))
+                    self.after(0, self._hide_dl_bar)
                 except Exception as e:
                     msg = str(e)
                     self.after(0, self._hide_dl_bar)
-                    self.after(0, lambda: self.reload_btn.configure(state="normal"))
                     self.after(0, lambda: messagebox.showerror(
                         "下載失敗",
-                        f"1.7B 模型下載失敗：\n{msg}\n\n"
-                        "請確認網路連線後點「重新載入」重試。",
+                        f"chatllm 模型下載失敗：\n{msg}\n\n請確認網路連線後點「重新載入」重試。",
                     ))
                     self.after(0, lambda: self._set_status("❌ 下載失敗"))
+                    self.after(0, lambda: self.reload_btn.configure(state="normal"))
                     return
-                self.after(0, self._hide_dl_bar)
 
-        # 根據選擇的模型建立對應引擎
-        if "1.7B" in model_sel:
-            self.engine = ASREngine1p7B()
+            # 持久化完整設定（確保下次啟動不會重觸 onboarding）
+            settings["model_path"]  = str(model_path)
+            settings["chatllm_dir"] = str(chatllm_dir)
+            self._settings = settings
+            self._save_settings(settings)
+
+            # 設定 _model_dir 供 diarization 下載確認流程使用
+            self._model_dir = Path(settings.get("model_dir", str(BASE_DIR / "ov_models")))
+
+            self.engine = ChatLLMASREngine()
+            try:
+                self.engine.load(
+                    model_path  = model_path,
+                    chatllm_dir = chatllm_dir,
+                    n_gpu_layers= 99,
+                    cb          = self._set_status,
+                )
+                self.after(0, self._on_models_ready)
+            except Exception as e:
+                first_line = str(e).splitlines()[0][:120]
+                self.after(0, lambda r=first_line: self._on_models_failed("chatllm", r))
+
         else:
-            self.engine = ASREngine()
-        try:
-            self.engine.load(device=device, model_dir=self._model_dir, cb=self._set_status)
-            self.after(0, self._on_models_ready)
-        except Exception as e:
-            # 取得簡短錯誤訊息（OpenVINO 錯誤通常很長）
-            first_line = str(e).splitlines()[0][:120]
-            self.after(0, lambda d=device, r=first_line: self._on_models_failed(d, r))
+            # ── OpenVINO 路線 ──────────────────────────────────────────
+            model_dir  = Path(settings.get("model_dir", str(_DEFAULT_MODEL_DIR)))
+            model_size = settings.get("cpu_model_size", self.model_var.get())
+            self._model_dir = model_dir
+
+            # 1.7B 按需下載
+            use_17b = "1.7B" in model_size
+            if use_17b:
+                from downloader import quick_check_1p7b, download_1p7b
+                if not quick_check_1p7b(model_dir):
+                    self.after(0, self._show_dl_bar)
+                    self._set_status("⬇ 下載 1.7B 模型（約 4.3 GB）…")
+                    try:
+                        download_1p7b(model_dir, progress_cb=self._on_dl_progress)
+                    except Exception as e:
+                        msg = str(e)
+                        self.after(0, self._hide_dl_bar)
+                        self.after(0, lambda: self.reload_btn.configure(state="normal"))
+                        self.after(0, lambda: messagebox.showerror(
+                            "下載失敗",
+                            f"1.7B 模型下載失敗：\n{msg}\n\n"
+                            "請確認網路連線後點「重新載入」重試。",
+                        ))
+                        self.after(0, lambda: self._set_status("❌ 下載失敗"))
+                        return
+                    self.after(0, self._hide_dl_bar)
+
+            self.engine = ASREngine1p7B() if use_17b else ASREngine()
+            try:
+                self.engine.load(device=ov_device, model_dir=model_dir, cb=self._set_status)
+                self.after(0, self._on_models_ready)
+            except Exception as e:
+                first_line = str(e).splitlines()[0][:120]
+                self.after(0, lambda d=ov_device, r=first_line: self._on_models_failed(d, r))
 
     def _on_models_ready(self):
         self.device_combo.configure(state="readonly")
         self.reload_btn.configure(state="normal")
         self.convert_btn.configure(state="normal")
         self.rt_start_btn.configure(state="normal")
-        device = self.device_var.get()
-        self._set_status(f"✅ 就緒（{device}）")
+
+        settings = self._settings or {}
+        backend  = settings.get("backend", "openvino")
+        device   = self.device_var.get()
+
+        # ── model_combo 依後端顯示 ─────────────────────────────────────
+        if backend == "chatllm":
+            # Vulkan GPU：顯示固定標籤，combo 唯讀
+            self.model_combo.configure(
+                values=["1.7B Q8_0 (Vulkan GPU)"], state="disabled"
+            )
+            self.model_var.set("1.7B Q8_0 (Vulkan GPU)")
+            self._set_status(f"✅ 就緒（Vulkan GPU）")
+        else:
+            # OpenVINO：顯示 0.6B / 1.7B，可切換
+            self.model_combo.configure(
+                values=["Qwen3-ASR-0.6B", "Qwen3-ASR-1.7B INT8"],
+                state="readonly",
+            )
+            sz = settings.get("cpu_model_size", "0.6B")
+            self.model_var.set(
+                "Qwen3-ASR-1.7B INT8" if sz == "1.7B" else "Qwen3-ASR-0.6B"
+            )
+            self._set_status(f"✅ 就緒（{device}）")
+
         # 填入語系清單（模型載入後才知道 supported_languages）
         if self.engine.processor and self.engine.processor.supported_languages:
             langs = ["自動偵測"] + self.engine.processor.supported_languages
             self._lang_list = self.engine.processor.supported_languages
             self.lang_combo.configure(values=langs, state="readonly")
+            self.lang_var.set("自動偵測")
+        elif backend == "chatllm":
+            # chatllm 模型支援所有語系，提供常用語系清單
+            common_langs = [
+                "Chinese", "English", "Japanese", "Korean",
+                "Cantonese", "French", "German", "Spanish",
+                "Portuguese", "Russian", "Arabic", "Thai",
+                "Vietnamese", "Indonesian", "Malay",
+            ]
+            self.lang_combo.configure(
+                values=["自動偵測"] + common_langs, state="readonly"
+            )
             self.lang_var.set("自動偵測")
         # 說話者分離 checkbox
         if self.engine.diar_engine and self.engine.diar_engine.ready:
@@ -1409,6 +2470,21 @@ class App(ctk.CTk):
         if self._rt_mgr:
             self._on_rt_stop()
 
+        # 從 UI 狀態同步設定（允許使用者在 dev_bar 手動切換裝置後重新載入）
+        dev_label  = self.device_var.get()
+        model_sel  = self.model_var.get()
+        cur        = dict(self._settings) if self._settings else self._load_settings()
+
+        if "Vulkan" in dev_label:
+            cur["backend"] = "chatllm"
+            cur["device"]  = dev_label
+        else:
+            cur["backend"] = "openvino"
+            cur["device"]  = dev_label
+            cur["cpu_model_size"] = "1.7B" if "1.7B" in model_sel else "0.6B"
+
+        self._settings = cur
+
         self.engine.ready = False
         self.convert_btn.configure(state="disabled")
         self.rt_start_btn.configure(state="disabled")
@@ -1455,6 +2531,18 @@ class App(ctk.CTk):
             self.file_entry.insert(0, str(self._audio_file))
             if self.engine.ready:
                 self.convert_btn.configure(state="normal")
+
+    def _on_verify(self):
+        """開啟字幕驗證編輯視窗。"""
+        if not self._srt_output or not self._srt_output.exists():
+            messagebox.showwarning("提示", "尚無可驗證的字幕，請先執行轉換。")
+            return
+        SubtitleEditorWindow(
+            self,
+            srt_path     = self._srt_output,
+            audio_path   = self._audio_file,
+            diarize_mode = getattr(self, "_file_diarize", False),
+        )
 
     def _on_convert(self):
         if self._converting:
@@ -1522,6 +2610,7 @@ class App(ctk.CTk):
                 self.after(0, lambda: [
                     self.prog_bar.set(1.0),
                     self.open_dir_btn.configure(state="normal"),
+                    self.verify_btn.configure(state="normal"),
                     self.prog_label.configure(text="完成"),
                 ])
             else:
@@ -1633,6 +2722,13 @@ class App(ctk.CTk):
                 default="no",
             ):
                 return
+
+        # 停止 Streamlit 服務
+        if self._sl_process:
+            try:
+                self._sl_process.terminate()
+            except Exception:
+                pass
 
         # 停止即時錄音（安靜地停，不需要確認）
         if self._rt_mgr:

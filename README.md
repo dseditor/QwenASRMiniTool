@@ -10,12 +10,15 @@
 ## 功能
 
 - 音訊檔案（MP3 / WAV / FLAC / M4A / OGG）→ SRT 字幕
+- **影片檔案**（MP4 / MKV / AVI / MOV / WMV 等）→ 自動提取音軌 → SRT 字幕
 - 即時語音辨識（麥克風輸入），並非完全串流即時，會在停頓中自動處理辨識
 - 自動 VAD 靜音偵測，分段轉錄
 - **說話者分離**（Speaker Diarization）：可指定說話人數，SRT 自動標記說話者身份
 - **多語系辨識**：支援中文、日文、英文等 30 種語系，亦可設為自動偵測
 - **辨識提示**（參考文字）：可貼入歌詞、關鍵字或背景說明，提升辨識準確度
-- 繁體中文輸出，可辨識中英混合
+- **大量音檔排程**：可一次匯入多個音訊 / 影片檔案，依序自動辨識並產生 SRT
+- **深淺色模式**：支援深色 / 淺色介面切換，可於設定分頁自由調整
+- **簡繁體中文輸出**：可於設定分頁切換輸出語系為繁體中文或簡體中文
 - 首次執行請選擇資料夾自動下載模型（約 1.2 GB）
 - Portable 版本包括模型開箱即用，Basic 版本檔案較小，採自動下載模型
 - 若系統已有 Python 虛擬環境且已安裝需求，可執行 `app.py`，使用 `build.bat` 可建立為 exe 檔案
@@ -191,16 +194,56 @@ Streamlit 前端可從網路端點（例如手機上）使用麥克風，採取�
 
 ---
 
-### Streamlit 伺服器模式（0223 更新，實驗性）
+### 設定分頁：深淺色模式與簡繁體輸出（0224 新增）
 
-![Streamlit 伺服器](Readme/readme16.jpg)
+![設定分頁介面](Readme/readme16.jpg)
 
-EXE 版本現在可於「**服務**」分頁啟動 Streamlit 網頁前端，以 Vulkan GPU 作為推理核心，
-可在內網以瀏覽器或手機存取。
+新增獨立「**設定**」分頁，集中管理外觀與輸出偏好：
 
-> ⚠️ **注意：此功能目前穩定度不足，請謹慎使用。**
-> 已知問題包括：長時間運行可能出現例外、音訊串流不穩定等。
-> 建議於測試環境評估，正式場景請繼續使用桌面應用（CustomTkinter）。
+**深淺色模式**
+- 支援「**深色**」、「**淺色**」與「**跟隨系統**」三種模式
+- 切換後即時生效，無需重新啟動
+
+**簡繁體中文輸出**
+- 於「**中文輸出**」選項中選擇「**繁體中文**」或「**簡體中文**」
+- 使用 OpenCC 轉換，適合不同地區的使用者需求
+- 對 CPU 模式（OpenVINO）與 GPU 模式（Vulkan）均有效
+
+---
+
+### 影片檔案直接辨識（ffmpeg 整合，0224 新增）
+
+![影片音訊提取字幕](Readme/readme17.jpg)
+
+現在可直接選擇影片檔案（MP4、MKV、AVI、MOV、WMV 等 16 種格式），程式自動呼叫 ffmpeg 提取音軌後進行辨識，流程與音訊檔案完全一致：
+
+1. 點選「**瀏覽…**」，直接選擇影片檔（或音訊檔）
+2. 若本機尚未安裝 ffmpeg，程式會彈出對話框詢問是否**一鍵下載**（約 55 MB，Windows gpl-essentials 版）
+3. 下載後儲存於 `<App 目錄>/ffmpeg/ffmpeg.exe`，後續不再提示
+4. 點選「**▶ 開始轉換**」，後續與音訊辨識流程相同
+
+**支援影片格式：** `.mp4` `.mkv` `.avi` `.mov` `.wmv` `.flv` `.webm` `.ts` `.m2ts` `.mpg` `.mpeg` `.m4v` `.vob` `.3gp` `.f4v` `.mxf`
+
+> 若系統 PATH 已有 ffmpeg（如透過 winget / Chocolatey 安裝），程式會直接使用，不額外下載。
+
+---
+
+### 大量音檔排程（Batch 分頁，0224 新增）
+
+![大量音檔排程介面](Readme/readme17.jpg)
+
+新增「**批次辨識**」分頁，支援一次匯入大量音訊 / 影片檔案，依序自動辨識：
+
+1. 點選「**+ 加入檔案**」可多選，亦可直接拖曳檔案進清單
+2. 清單顯示每個檔案的辨識狀態（等待中 / 辨識中 / 完成 / 失敗）
+3. 點選「**▶ 開始批次辨識**」後，依序處理所有檔案
+4. 每個檔案完成後，點選「**⋯**」按鈕可直接開啟字幕驗證編輯器
+5. 批次過程中可隨時新增檔案，不影響正在執行的任務
+
+**適用場景：**
+- 一次過處理整個會議錄音資料夾
+- 批量為多集 Podcast 生成字幕
+- 課堂錄影批次轉字幕
 
 ---
 
@@ -275,8 +318,11 @@ python generate_prompt_template.py
 
 ```
 app.py                  # CustomTkinter GUI 主程式（Basic / Portable EXE）
+setting.py              # 設定分頁（深淺色模式、語系、模型路徑、ffmpeg 設定）
+batch_tab.py            # 批次辨識分頁（大量音訊 / 影片檔案排程處理）
+ffmpeg_utils.py         # ffmpeg 偵測、影片音軌提取、一鍵下載對話框
+subtitle_editor.py      # 字幕驗證與編輯視窗（時間軸拖曳、播放）
 chatllm_engine.py       # Vulkan GPU 推理引擎（chatllm.cpp subprocess 包裝）
-streamlit_app.py        # Streamlit 前端（EXE 服務分頁，實驗性）
 app-gpu.py              # PyTorch CUDA 版本（維護模式，不再主動更新）
 start-gpu.bat           # PyTorch GPU 啟動器（維護模式）
 downloader.py           # 模型完整性檢查與自動下載（含 LFS 指標檔偵測）
@@ -288,6 +334,8 @@ chatllm/                # Vulkan 推理 DLL 與執行檔（非 EXE 內部，需�
   ggml-vulkan.dll            # Vulkan GPU 後端
   ggml-cpu-*.dll             # CPU fallback 變體
   main.exe                   # GPU 偵測與推理執行檔
+ffmpeg/
+  ffmpeg.exe                 # 影片音軌提取工具（首次使用影片時自動下載，~55 MB）
 ov_models/
   mel_filters.npy            # 預計算 Mel 濾波器
   silero_vad_v4.onnx         # VAD 靜音偵測模型
@@ -306,6 +354,10 @@ GPUModel/
   本專案使用 chatllm.cpp 的預編譯 DLL 與執行檔作為 Vulkan GPU 推理後端。
   我們使用的是官方 GitHub Releases 提供的 Windows 預編譯版本，未從原始碼自行編譯。
   感謝作者 foldl 提供高效的多後端 LLM 推理引擎，並支援 Qwen3-ASR 模型格式。
+
+- **[FFmpeg](https://ffmpeg.org/)**（BtbN/FFmpeg-Builds，GPL 授權）
+  本專案於使用者處理影片檔案時，提供 ffmpeg Windows 預編譯版本的一鍵下載引導。
+  ffmpeg 二進位並未內嵌於程式本體，由使用者自行下載並同意其授權條款。
 
 ---
 

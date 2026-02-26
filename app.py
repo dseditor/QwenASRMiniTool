@@ -1195,6 +1195,10 @@ class App(ctk.CTk):
         global _g_output_simplified
         _g_output_simplified = (value == "簡體")
         self._patch_setting("output_simplified", _g_output_simplified)
+        # 同步更新 chatllm_engine 模組旗標（ChatLLM 後端使用）
+        if _CHATLLM_AVAILABLE:
+            import chatllm_engine as _ce
+            _ce._output_simplified = _g_output_simplified
 
     def _on_appearance_change(self, value: str):
         """主題切換：深色 🌑 or 淺色 ☀。"""
@@ -1274,6 +1278,10 @@ class App(ctk.CTk):
         # 套用 UI 偏好（簡繁模式 + 外觀主題）
         global _g_output_simplified
         _g_output_simplified = settings.get("output_simplified", False)
+        # 同步 chatllm_engine 模組旗標
+        if _CHATLLM_AVAILABLE:
+            import chatllm_engine as _ce
+            _ce._output_simplified = _g_output_simplified
         self.after(0, lambda s=settings: self._apply_ui_prefs(s))
 
         # 同步 device_combo 到已儲存的裝置
@@ -1531,12 +1539,13 @@ class App(ctk.CTk):
                                "/resolve/main/qwen3-asr-1.7b.bin")
 
                         def _dl_bin():
-                            import urllib.request
+                            import ssl, urllib.request
+                            from downloader import _ssl_ctx
                             req = urllib.request.Request(
                                 url,
                                 headers={"User-Agent": "Mozilla/5.0 (compatible; QwenASR)"}
                             )
-                            with urllib.request.urlopen(req) as resp, \
+                            with urllib.request.urlopen(req, context=_ssl_ctx()) as resp, \
                                  open(str(bin_dest) + ".tmp", "wb") as out:
                                 total = int(resp.headers.get("Content-Length", 0))
                                 done  = 0
@@ -1658,13 +1667,14 @@ class App(ctk.CTk):
                 self._set_status("⬇ 下載 chatllm 模型（~2.3 GB）…")
                 try:
                     import urllib.request
+                    from downloader import _ssl_ctx
                     url = ("https://huggingface.co/dseditor/Collection"
                            "/resolve/main/qwen3-asr-1.7b.bin")
                     model_path.parent.mkdir(parents=True, exist_ok=True)
                     req = urllib.request.Request(
                         url, headers={"User-Agent": "Mozilla/5.0 (compatible; QwenASR)"}
                     )
-                    with urllib.request.urlopen(req) as resp, \
+                    with urllib.request.urlopen(req, context=_ssl_ctx()) as resp, \
                          open(str(model_path) + ".tmp", "wb") as out:
                         total = int(resp.headers.get("Content-Length", 0))
                         done  = 0
@@ -1700,12 +1710,20 @@ class App(ctk.CTk):
             # 設定 _model_dir 供 diarization 下載確認流程使用
             self._model_dir = Path(settings.get("model_dir", str(BASE_DIR / "ov_models")))
 
+            # 從 device_label 解析 Vulkan device ID
+            # 格式：「GPU:0 (AMD Radeon(TM) Graphics) [Vulkan]」
+            _vk_dev_id = 0
+            _m = re.search(r"GPU:(\d+)", device_label)
+            if _m:
+                _vk_dev_id = int(_m.group(1))
+
             self.engine = ChatLLMASREngine()
             try:
                 self.engine.load(
                     model_path  = model_path,
                     chatllm_dir = chatllm_dir,
                     n_gpu_layers= 99,
+                    device_id   = _vk_dev_id,
                     cb          = self._set_status,
                 )
                 self.after(0, self._on_models_ready)
@@ -1872,18 +1890,43 @@ class App(ctk.CTk):
             ))
 
     def _on_models_failed(self, device: str, reason: str):
-        """模型載入失敗：還原 UI，讓使用者可以切換裝置後重試。"""
-        self.device_combo.configure(state="readonly")
-        self.reload_btn.configure(state="normal")   # 允許切換裝置後重試
-        self.status_dot.configure(
-            text=f"❌ {device} 載入失敗，請切換裝置後點「重新載入」",
-            text_color="#EF5350",
-        )
-        messagebox.showerror(
-            "模型載入失敗",
-            f"裝置「{device}」載入失敗：\n{reason}\n\n"
-            "建議：將裝置切換為 CPU 後點「重新載入」。",
-        )
+        """模型載入失敗：若為 Vulkan（chatllm）後端，自動退回 CPU 重試；
+        若本身已是 OpenVINO 路線，還原 UI 讓使用者手動選擇。
+        """
+        # ── 判斷是否為 Vulkan 後端失敗 ──────────────────────────────────
+        failed_backend = (self._settings or {}).get("backend", "openvino")
+
+        if failed_backend == "chatllm":
+            # Vulkan 引擎（AMD / NVIDIA）失敗 → 自動 fallback 到 CPU
+            # 1. 通知使用者（非阻塞式，因為要繼續觸發 fallback 載入）
+            self.after(0, lambda: messagebox.showwarning(
+                "GPU 引擎失敗，自動退回 CPU",
+                f"Vulkan GPU（{device}）載入失敗：\n{reason}\n\n"
+                "已自動切換為 CPU 模式重新載入，請稍候…",
+            ))
+            # 2. 更新設定與 UI 選單至 CPU
+            fallback: dict = dict(self._settings) if self._settings else {}
+            fallback["backend"] = "openvino"
+            fallback["device"]  = "CPU"
+            self._settings = fallback
+            self._save_settings(fallback)
+            self.device_var.set("CPU")
+            # 3. 在背景執行緒重新以 CPU 載入（不阻塞 UI thread）
+            self.engine.ready = False
+            threading.Thread(target=self._load_models, daemon=True).start()
+        else:
+            # OpenVINO 路線失敗（GPU.0 Intel iGPU 等）→ 還原 UI 讓使用者重試
+            self.device_combo.configure(state="readonly")
+            self.reload_btn.configure(state="normal")
+            self.status_dot.configure(
+                text=f"❌ {device} 載入失敗，請切換裝置後點「重新載入」",
+                text_color="#EF5350",
+            )
+            messagebox.showerror(
+                "模型載入失敗",
+                f"裝置「{device}」載入失敗：\n{reason}\n\n"
+                "建議：將裝置切換為 CPU 後點「重新載入」。",
+            )
 
     def _on_reload_models(self):
         if self._converting:

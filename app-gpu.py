@@ -264,90 +264,138 @@ def _ts_to_subtitle_lines(
     cc,
     simplified: bool,
 ) -> list[tuple[float, float, str, str | None]]:
-    """ForcedAligner 逐字 token + ASR 原文（含標點）→ 字幕行。
+    """ForcedAligner token（詞級別）+ ASR 原文（含標點）→ 字幕行。
 
-    ForcedAligner token 是單字元（含英文字母），直接 join 會黏字
-    （如 Deepwithinthe）。本函式以 raw_text 為藍本：
-      - 標點 → 切行（含英文逗號）
-      - 空格 → 記錄詞界但不消耗 token
-      - 一般字元 → 消耗一個 token，記錄到緩衝
-    輸出時以 _rebuild_text_with_spaces() 重建含空格的正確文字。
+    ── FA token 與 raw_text 的對應關係 ────────────────────────────────
+    FA 的 tokenize_space_lang() 會：
+      1. 先按空格切詞 → ["Deep", "within", "the", "labyrinth"]
+      2. 對含中文的詞再逐字分 → ["迷", "宮"]
+    所以一個 FA token 對應「一個英文詞」或「一個中文字」。
+
+    本函式策略：
+      - 以 raw_text 的「標點切割後的子句」為單位收集詞
+      - 遇到標點 → 切行，不輸出標點
+      - 每個詞消耗一個 FA token，取其時間軸
+      - MAX_WORDS 保護（英文以詞數限制，中文以字數限制）
+    ──────────────────────────────────────────────────────────────────
     """
-    # 英文逗號也觸發切行（中文逗號已在 _ZH_CLAUSE_END）
-    _all_punct = _ZH_CLAUSE_END | _EN_SENT_END  # 含 ,
+    _all_punct = _ZH_CLAUSE_END | _EN_SENT_END  # 含英文逗號
     result: list[tuple[float, float, str, str | None]] = []
 
-    token_idx      = 0
-    seg_tokens: list = []
-    seg_raw_chars: list[str] = []   # 每個非標點字元（含空格）
-    seg_char_count = 0
+    # ── 以 raw_text 為藍本，提取「詞序列」（去掉標點，保留空格詞界）──
+    # 步驟1：把 raw_text 按標點切成子句 list
+    # 步驟2：每個子句按空格切詞；中文逐字切
+    # 步驟3：逐詞消耗 FA token，累積完整子句後輸出
+    MAX_WORDS    = 8   # 一行最多幾個英文詞（無標點時的保護）
+    MAX_ZH_CHARS = MAX_CHARS  # 中文維持字元數限制
 
-    def _emit_segment(end_override: float | None = None):
-        """將 seg_tokens/seg_raw_chars 轉為一條字幕，加入 result。"""
-        nonlocal seg_tokens, seg_raw_chars, seg_char_count
+    token_idx = 0
+
+    def _is_latin_word(w: str) -> bool:
+        return all(ord(c) < 128 for c in w if c.isalpha())
+
+    def _tokenize_text(text: str) -> list[str]:
+        """模擬 FA 的 tokenize_space_lang：空格切詞 + 中文逐字。"""
+        tokens: list[str] = []
+        for seg in text.split():
+            # 去掉標點
+            cleaned = "".join(c for c in seg if c not in _all_punct)
+            if not cleaned:
+                continue
+            # 中文字元逐字，英文/拉丁整字
+            buf = ""
+            for c in cleaned:
+                if ord(c) > 127:  # 中文/日文等
+                    if buf:
+                        tokens.append(buf); buf = ""
+                    tokens.append(c)
+                else:
+                    buf += c
+            if buf:
+                tokens.append(buf)
+        return tokens
+
+    def _emit(seg_tokens: list, seg_words: list[str]) -> None:
+        """seg_tokens: FA token list, seg_words: 對應原始詞（含空格資訊）"""
         if not seg_tokens:
             return
         start = chunk_offset + seg_tokens[0].start_time
-        end   = chunk_offset + (end_override if end_override is not None
-                                else seg_tokens[-1].end_time)
-        # 以 raw_text 字元序列（含空格）重建可讀文字
-        text = _rebuild_text_with_spaces(seg_raw_chars)
+        end   = chunk_offset + seg_tokens[-1].end_time
+        text  = " ".join(seg_words) if any(_is_latin_word(w) for w in seg_words) \
+                else "".join(seg_words)
         if not simplified and cc is not None:
             text = cc.convert(text)
         if end > start and text.strip():
             result.append((start, end, text.strip(), spk))
-        seg_tokens    = []
-        seg_raw_chars = []
-        seg_char_count = 0
 
+    # ── 按標點切子句，逐子句收集 token ────────────────────────────────
+    # 先把 raw_text 切成「子句 + 標點標記」序列
+    clauses: list[str] = []
+    buf = ""
     for ch in raw_text:
         if ch in _all_punct:
-            _emit_segment()
+            if buf.strip():
+                clauses.append(buf.strip())
+            buf = ""
+        else:
+            buf += ch
+    if buf.strip():
+        clauses.append(buf.strip())
+
+    seg_fa_tokens: list = []
+    seg_words: list[str] = []
+    word_count = 0
+    zh_char_count = 0
+
+    for clause in clauses:
+        # 當前子句的詞序列（去標點）
+        clause_words = _tokenize_text(clause)
+        if not clause_words:
             continue
 
-        # 空格：記錄詞界，不消耗 token
-        if ch == " ":
-            if seg_raw_chars:   # 有內容時才記錄空格
-                seg_raw_chars.append(" ")
-            continue
+        # 整個子句的詞都收集起來，到子句末才切行
+        clause_fa = []
+        clause_w  = []
+        for word in clause_words:
+            if token_idx >= len(ts_list):
+                break
+            ts = ts_list[token_idx]
+            token_idx += 1
+            clause_fa.append(ts)
+            clause_w.append(word)
 
-        # 一般字元（非標點非空格）：消耗一個 token
-        if token_idx >= len(ts_list):
-            break   # token 已耗盡（保護性退出）
+        # 合併到當前段落緩衝
+        seg_fa_tokens.extend(clause_fa)
+        seg_words.extend(clause_w)
 
-        ts = ts_list[token_idx]
-        token_idx += 1
+        # 計算保護上限
+        is_latin = any(_is_latin_word(w) for w in seg_words)
+        if is_latin:
+            over_limit = len(seg_words) > MAX_WORDS
+        else:
+            over_limit = sum(len(w) for w in seg_words) > MAX_ZH_CHARS
 
-        # MAX_CHARS 保護（無標點長句）
-        if seg_tokens and seg_char_count + 1 > MAX_CHARS:
-            _emit_segment()
+        # 子句結束 → 切行（標點觸發）
+        _emit(seg_fa_tokens, seg_words)
+        seg_fa_tokens = []
+        seg_words     = []
 
-        seg_tokens.append(ts)
-        seg_raw_chars.append(ch)
-        seg_char_count += 1
-
-    _emit_segment()
+    # 剩餘未輸出的
+    _emit(seg_fa_tokens, seg_words)
     return result
 
 
 def _rebuild_text_with_spaces(raw_chars: list[str]) -> str:
-    """以 raw_text 的字元序列（含空格）重建可讀字幕文字。
-
-    規則：
-    - 英文字母之間保留空格（詞界）
-    - 中文/日文字元之間不加空格
-    - 連續空格折疊為一個
-    - 頭尾去空格
-    """
+    """以 raw_text 的字元序列（含空格）重建可讀字幕文字（輔助函式，保留相容）。"""
     result: list[str] = []
     for ch in raw_chars:
         if ch == " ":
-            # 僅在有內容且上一字元不是空格時加入
             if result and result[-1] != " ":
                 result.append(" ")
         else:
             result.append(ch)
     return "".join(result).strip()
+
 
 
 # 全域：是否輸出簡體中文（True = 跳過 OpenCC 繁化）

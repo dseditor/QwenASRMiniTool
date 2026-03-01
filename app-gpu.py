@@ -143,11 +143,10 @@ def _detect_speech_groups(audio: np.ndarray, vad_sess) -> list[tuple[float, floa
 
     result = []
     for gs, ge in groups:
-        ns = max(1, int((ge - gs) // SAMPLE_RATE))
-        ch = audio[gs: gs + ns * SAMPLE_RATE].astype(np.float32)
-        if len(ch) < SAMPLE_RATE:
+        ch = audio[gs:ge].astype(np.float32)
+        if len(ch) < SAMPLE_RATE // 2:      # 最小 0.5 秒
             continue
-        result.append((gs / SAMPLE_RATE, gs / SAMPLE_RATE + ns, ch))
+        result.append((gs / SAMPLE_RATE, ge / SAMPLE_RATE, ch))
     return result
 
 
@@ -263,125 +262,140 @@ def _ts_to_subtitle_lines(
     spk: str | None,
     cc,
     simplified: bool,
+    aligner_processor=None,
+    language: str | None = None,
 ) -> list[tuple[float, float, str, str | None]]:
     """ForcedAligner token（詞級別）+ ASR 原文（含標點）→ 字幕行。
 
-    ── FA token 與 raw_text 的對應關係 ────────────────────────────────
-    FA 的 tokenize_space_lang() 會：
-      1. 先按空格切詞 → ["Deep", "within", "the", "labyrinth"]
-      2. 對含中文的詞再逐字分 → ["迷", "宮"]
-    所以一個 FA token 對應「一個英文詞」或「一個中文字」。
-
-    本函式策略：
-      - 以 raw_text 的「標點切割後的子句」為單位收集詞
-      - 遇到標點 → 切行，不輸出標點
-      - 每個詞消耗一個 FA token，取其時間軸
-      - MAX_WORDS 保護（英文以詞數限制，中文以字數限制）
-    ──────────────────────────────────────────────────────────────────
+    使用 FA 的 aligner_processor.tokenize_space_lang() 產出 word_list，
+    保證與 ts_list 完全 1:1 對應。再將每個 word 映射回 raw_text 的
+    原始位置，以標點觸發切行。
     """
-    _all_punct = _ZH_CLAUSE_END | _EN_SENT_END  # 含英文逗號
+    _all_punct = _ZH_CLAUSE_END | _EN_SENT_END
+    MAX_WORDS    = 8
+    MAX_ZH_CHARS = MAX_CHARS
     result: list[tuple[float, float, str, str | None]] = []
 
-    # ── 以 raw_text 為藍本，提取「詞序列」（去掉標點，保留空格詞界）──
-    # 步驟1：把 raw_text 按標點切成子句 list
-    # 步驟2：每個子句按空格切詞；中文逐字切
-    # 步驟3：逐詞消耗 FA token，累積完整子句後輸出
-    MAX_WORDS    = 8   # 一行最多幾個英文詞（無標點時的保護）
-    MAX_ZH_CHARS = MAX_CHARS  # 中文維持字元數限制
+    if not ts_list or not raw_text.strip():
+        return result
 
-    token_idx = 0
-
-    def _is_latin_word(w: str) -> bool:
-        return all(ord(c) < 128 for c in w if c.isalpha())
-
-    def _tokenize_text(text: str) -> list[str]:
-        """模擬 FA 的 tokenize_space_lang：空格切詞 + 中文逐字。"""
-        tokens: list[str] = []
-        for seg in text.split():
-            # 去掉標點
-            cleaned = "".join(c for c in seg if c not in _all_punct)
+    # ── 1. 用 FA 的 tokenizer 產出 word_list（與 ts_list 1:1）────────
+    lang_lower = (language or "chinese").lower()
+    if aligner_processor is not None:
+        if lang_lower == "japanese":
+            word_list = aligner_processor.tokenize_japanese(raw_text)
+        elif lang_lower == "korean":
+            if aligner_processor.ko_tokenizer is None:
+                try:
+                    from soynlp.tokenizer import LTokenizer
+                    aligner_processor.ko_tokenizer = LTokenizer(
+                        scores=aligner_processor.ko_score)
+                except ImportError:
+                    pass
+            if aligner_processor.ko_tokenizer is not None:
+                word_list = aligner_processor.tokenize_korean(
+                    aligner_processor.ko_tokenizer, raw_text)
+            else:
+                word_list = aligner_processor.tokenize_space_lang(raw_text)
+        else:
+            word_list = aligner_processor.tokenize_space_lang(raw_text)
+    else:
+        # Fallback: 模擬 tokenize_space_lang（相容舊路徑）
+        word_list = []
+        for seg in raw_text.split():
+            cleaned = "".join(c for c in seg
+                              if c.isalpha() or c.isdigit() or c == "'")
             if not cleaned:
                 continue
-            # 中文字元逐字，英文/拉丁整字
             buf = ""
             for c in cleaned:
-                if ord(c) > 127:  # 中文/日文等
+                if '\u4e00' <= c <= '\u9fff':
                     if buf:
-                        tokens.append(buf); buf = ""
-                    tokens.append(c)
+                        word_list.append(buf); buf = ""
+                    word_list.append(c)
                 else:
                     buf += c
             if buf:
-                tokens.append(buf)
-        return tokens
+                word_list.append(buf)
 
-    def _emit(seg_tokens: list, seg_words: list[str]) -> None:
-        """seg_tokens: FA token list, seg_words: 對應原始詞（含空格資訊）"""
+    # 取 min 以防長度不一致（防禦性）
+    n = min(len(word_list), len(ts_list))
+
+    # ── 2. 為每個 word 在 raw_text 中找到對應位置 ────────────────────
+    #    並記錄「在這個 word 之前有哪些標點」→ 用於切行
+    seg_tokens: list = []      # 當前行的 FA token
+    seg_words: list[str] = []  # 當前行的原始 word
+    ri = 0                     # raw_text 掃描位置
+
+    def _is_latin_word(w: str) -> bool:
+        return any(c.isascii() and c.isalpha() for c in w)
+
+    def _emit():
+        nonlocal seg_tokens, seg_words
         if not seg_tokens:
+            seg_tokens = []
+            seg_words  = []
             return
         start = chunk_offset + seg_tokens[0].start_time
         end   = chunk_offset + seg_tokens[-1].end_time
-        text  = " ".join(seg_words) if any(_is_latin_word(w) for w in seg_words) \
-                else "".join(seg_words)
+        # 重建文字：有拉丁詞用空格 join，純中文直接 join
+        if any(_is_latin_word(w) for w in seg_words):
+            text = " ".join(seg_words)
+        else:
+            text = "".join(seg_words)
         if not simplified and cc is not None:
             text = cc.convert(text)
         if end > start and text.strip():
             result.append((start, end, text.strip(), spk))
+        seg_tokens = []
+        seg_words  = []
 
-    # ── 按標點切子句，逐子句收集 token ────────────────────────────────
-    # 先把 raw_text 切成「子句 + 標點標記」序列
-    clauses: list[str] = []
-    buf = ""
-    for ch in raw_text:
-        if ch in _all_punct:
-            if buf.strip():
-                clauses.append(buf.strip())
-            buf = ""
-        else:
-            buf += ch
-    if buf.strip():
-        clauses.append(buf.strip())
+    def _over_limit() -> bool:
+        if any(_is_latin_word(w) for w in seg_words):
+            return len(seg_words) > MAX_WORDS
+        return sum(len(w) for w in seg_words) > MAX_ZH_CHARS
 
-    seg_fa_tokens: list = []
-    seg_words: list[str] = []
-    word_count = 0
-    zh_char_count = 0
+    for wi in range(n):
+        word = word_list[wi]
+        tok  = ts_list[wi]     # ForcedAlignItem: .text, .start_time, .end_time
 
-    for clause in clauses:
-        # 當前子句的詞序列（去標點）
-        clause_words = _tokenize_text(clause)
-        if not clause_words:
-            continue
+        # 在 raw_text 中前進到 word 的位置（跳過標點和空格）
+        # 遇到標點 → 切行
+        hit_punct = False
+        while ri < len(raw_text):
+            c = raw_text[ri]
+            if c in _all_punct:
+                hit_punct = True
+                ri += 1
+                continue
+            if c == " ":
+                ri += 1
+                continue
+            break  # 到達下一個有效字元
 
-        # 整個子句的詞都收集起來，到子句末才切行
-        clause_fa = []
-        clause_w  = []
-        for word in clause_words:
-            if token_idx >= len(ts_list):
-                break
-            ts = ts_list[token_idx]
-            token_idx += 1
-            clause_fa.append(ts)
-            clause_w.append(word)
+        if hit_punct:
+            _emit()  # 標點前的內容先輸出
 
-        # 合併到當前段落緩衝
-        seg_fa_tokens.extend(clause_fa)
-        seg_words.extend(clause_w)
+        seg_tokens.append(tok)
+        seg_words.append(word)
 
-        # 計算保護上限
-        is_latin = any(_is_latin_word(w) for w in seg_words)
-        if is_latin:
-            over_limit = len(seg_words) > MAX_WORDS
-        else:
-            over_limit = sum(len(w) for w in seg_words) > MAX_ZH_CHARS
+        # 在 raw_text 中跳過 word 佔用的字元
+        consumed = 0
+        word_len = len(word)
+        while ri < len(raw_text) and consumed < word_len:
+            c = raw_text[ri]
+            if c in _all_punct or c == " ":
+                ri += 1
+                continue
+            ri += 1
+            consumed += 1
 
-        # 子句結束 → 切行（標點觸發）
-        _emit(seg_fa_tokens, seg_words)
-        seg_fa_tokens = []
-        seg_words     = []
+        # MAX_CHARS / MAX_WORDS 保護
+        if _over_limit():
+            _emit()
 
-    # 剩餘未輸出的
-    _emit(seg_fa_tokens, seg_words)
+    # ── 3. 清空剩餘 ──────────────────────────────────────────────────
+    _emit()
     return result
 
 
@@ -479,6 +493,9 @@ class GPUASREngine:
             device_map=self.device,
             dtype=dtype,
         )
+        # 抑制 "Setting pad_token_id to eos_token_id" 重複警告
+        import transformers.utils.logging as _tf_logging
+        _tf_logging.set_verbosity_error()
 
         # ── ForcedAligner（可選，需模型目錄存在）────────────────────────
         self.aligner     = None
@@ -529,6 +546,7 @@ class GPUASREngine:
         context: str | None = None,
         diarize: bool = False,
         n_speakers: int | None = None,
+        original_path: Path | None = None,
     ) -> Path | None:
         """音檔 → SRT，回傳 SRT 路徑。"""
         import librosa
@@ -584,7 +602,9 @@ class GPUASREngine:
                     if ts_list:
                         subs = _ts_to_subtitle_lines(
                             ts_list, raw_text, g0, spk,
-                            self.cc, _g_output_simplified
+                            self.cc, _g_output_simplified,
+                            aligner_processor=self.aligner.aligner_processor,
+                            language=align_lang,
                         )
                         if subs:
                             all_subs.extend(subs)
@@ -606,7 +626,9 @@ class GPUASREngine:
         if progress_cb:
             progress_cb(total, total, "寫入 SRT…")
 
-        out = SRT_DIR / (audio_path.stem + ".srt")
+        # 以原始檔案的目錄與檔名輸出（影片抽音軌時 audio_path 是暫存路徑）
+        ref = original_path if original_path is not None else audio_path
+        out = ref.parent / (ref.stem + ".srt")
         with open(out, "w", encoding="utf-8") as f:
             for idx, (s, e, line, spk) in enumerate(all_subs, 1):
                 prefix = f"{spk}：" if spk else ""
@@ -1351,6 +1373,7 @@ class App(ctk.CTk):
             srt = self.engine.process_file(
                 proc_path, progress_cb=prog_cb, language=language,
                 context=context, diarize=diarize, n_speakers=n_speakers,
+                original_path=path,
             )
             elapsed = time.perf_counter() - t0
 

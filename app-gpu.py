@@ -493,10 +493,9 @@ class GPUASREngine:
             device_map=self.device,
             dtype=dtype,
         )
-        # 抑制 "Setting pad_token_id to eos_token_id" 警告
-        _inner = self.model.model  # 底層 HF model
-        if hasattr(_inner, "generation_config") and _inner.generation_config.pad_token_id is None:
-            _inner.generation_config.pad_token_id = _inner.generation_config.eos_token_id
+        # 抑制 "Setting pad_token_id to eos_token_id" 重複警告
+        import transformers.utils.logging as _tf_logging
+        _tf_logging.set_verbosity_error()
 
         # ── ForcedAligner（可選，需模型目錄存在）────────────────────────
         self.aligner     = None
@@ -547,6 +546,7 @@ class GPUASREngine:
         context: str | None = None,
         diarize: bool = False,
         n_speakers: int | None = None,
+        original_path: Path | None = None,
     ) -> Path | None:
         """音檔 → SRT，回傳 SRT 路徑。"""
         import librosa
@@ -626,7 +626,9 @@ class GPUASREngine:
         if progress_cb:
             progress_cb(total, total, "寫入 SRT…")
 
-        out = audio_path.parent / (audio_path.stem + ".srt")
+        # 以原始檔案的目錄與檔名輸出（影片抽音軌時 audio_path 是暫存路徑）
+        ref = original_path if original_path is not None else audio_path
+        out = ref.parent / (ref.stem + ".srt")
         with open(out, "w", encoding="utf-8") as f:
             for idx, (s, e, line, spk) in enumerate(all_subs, 1):
                 prefix = f"{spk}：" if spk else ""
@@ -1371,6 +1373,7 @@ class App(ctk.CTk):
             srt = self.engine.process_file(
                 proc_path, progress_cb=prog_cb, language=language,
                 context=context, diarize=diarize, n_speakers=n_speakers,
+                original_path=path,
             )
             elapsed = time.perf_counter() - t0
 

@@ -84,3 +84,4 @@ chatllmtest/
 # ── 允許 Readme 資料夾內的截圖 ─────────────────────────
 !Readme/*.jpg
 !Readme/*.png
+]

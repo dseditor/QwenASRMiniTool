@@ -257,8 +257,10 @@ class ASREngine:
         self.cc          = None
         self.diar_engine = None   # DiarizationEngine（可選）
 
-    def load(self, device: str = "CPU", model_dir: Path = None, cb=None):
-        """從背景執行緒呼叫。cb(msg) 用於更新 UI 狀態。"""
+    def load(self, device: str = "CPU", model_dir: Path = None, cb=None, cpu_threads: int = 0):
+        """從背景執行緒呼叫。cb(msg) 用於更新 UI 狀態。
+        cpu_threads: 0=OpenVINO 自動，>0=指定邏輯核心數（LATENCY hint）
+        """
         import onnxruntime as ort
         import openvino as ov
         import opencc
@@ -267,6 +269,16 @@ class ASREngine:
         if model_dir is None:
             model_dir = _DEFAULT_MODEL_DIR
         ov_dir   = model_dir / "qwen3_asr_int8"
+
+        # ── CPU 執行緒設定 ─────────────────────────────────────────────
+        # LATENCY hint：單一請求最低延遲（不同於 THROUGHPUT 批次模式）
+        # ENABLE_HYPER_THREADING YES：確保 P-core HT 與 E-core 均被使用
+        cpu_cfg: dict = {}
+        if device == "CPU":
+            cpu_cfg["PERFORMANCE_HINT"] = "LATENCY"
+            cpu_cfg["ENABLE_HYPER_THREADING"] = "YES"
+            if cpu_threads > 0:
+                cpu_cfg["INFERENCE_NUM_THREADS"] = str(cpu_threads)
         vad_path = model_dir / "silero_vad_v4.onnx"
 
         def _s(msg):
@@ -288,9 +300,9 @@ class ASREngine:
 
         _s(f"編譯 ASR 模型（{device}）…")
         core = ov.Core()
-        self.audio_enc = core.compile_model(str(ov_dir / "audio_encoder_model.xml"),      device)
-        self.embedder  = core.compile_model(str(ov_dir / "thinker_embeddings_model.xml"), device)
-        dec_comp       = core.compile_model(str(ov_dir / "decoder_model.xml"),            device)
+        self.audio_enc = core.compile_model(str(ov_dir / "audio_encoder_model.xml"),      device, cpu_cfg)
+        self.embedder  = core.compile_model(str(ov_dir / "thinker_embeddings_model.xml"), device, cpu_cfg)
+        dec_comp       = core.compile_model(str(ov_dir / "decoder_model.xml"),            device, cpu_cfg)
         self.dec_req   = dec_comp.create_infer_request()
 
         _s("載入 Processor（純 numpy）…")
@@ -393,6 +405,7 @@ class ASREngine:
         context: str | None = None,
         diarize: bool = False,
         n_speakers: int | None = None,
+        original_path: Path | None = None,
     ) -> Path | None:
         """音檔 → SRT，回傳 SRT 路徑。
         language   : 強制語系（如 "Chinese"），None 表示自動偵測
@@ -448,7 +461,9 @@ class ASREngine:
         if progress_cb:
             progress_cb(total, total, "寫入 SRT…")
 
-        out = SRT_DIR / (audio_path.stem + ".srt")
+        # 以原始檔案的目錄與檔名輸出（影片抽音軌時 audio_path 是暫存路徑）
+        ref = original_path if original_path is not None else audio_path
+        out = ref.parent / (ref.stem + ".srt")
         with open(out, "w", encoding="utf-8") as f:
             for idx, (s, e, line, spk) in enumerate(all_subs, 1):
                 prefix = f"{spk}：" if spk else ""
@@ -462,7 +477,7 @@ class ASREngine:
 
 class ASREngine1p7B(ASREngine):
     """
-    Qwen3-ASR-1.7B OpenVINO KV-cache 引擎。
+    Qwen3-ASR-1.7B OpenVINO KV-cache 引擎（INT8 版本）。
 
     模型目錄：ov_models/qwen3_asr_1p7b_kv_int8/
       audio_encoder_model.xml       — mel(128,1000)  → audio_embeds(1,130,2048)
@@ -473,127 +488,6 @@ class ASREngine1p7B(ASREngine):
 
     _OV_SUBDIR     = "qwen3_asr_1p7b_kv_int8"
     max_chunk_secs = 10   # audio_encoder 匯出固定 T=1000（10s）
-
-    def __init__(self):
-        super().__init__()
-        self.pf_model = None   # compiled prefill model
-        self.dc_model = None   # compiled decode-step model
-
-    def load(self, device: str = "CPU", model_dir: Path = None, cb=None):
-        import onnxruntime as ort
-        import openvino as ov
-        import opencc
-        from processor_numpy import LightProcessor
-
-        if model_dir is None:
-            model_dir = _DEFAULT_MODEL_DIR
-        kv_dir   = model_dir / self._OV_SUBDIR
-        vad_path = model_dir / "silero_vad_v4.onnx"
-
-        def _s(msg):
-            if cb: cb(msg)
-
-        _s("載入 VAD 模型…")
-        self.vad_sess = ort.InferenceSession(
-            str(vad_path), providers=["CPUExecutionProvider"]
-        )
-
-        _s("載入說話者分離模型…")
-        try:
-            from diarize import DiarizationEngine
-            diar_dir = model_dir / "diarization"
-            eng = DiarizationEngine(diar_dir)
-            self.diar_engine = eng if eng.ready else None
-        except Exception:
-            self.diar_engine = None
-
-        _s(f"編譯 1.7B ASR 模型（{device}）…")
-        core = ov.Core()
-        self.audio_enc = core.compile_model(str(kv_dir / "audio_encoder_model.xml"),      device)
-        self.embedder  = core.compile_model(str(kv_dir / "thinker_embeddings_model.xml"), device)
-        self.pf_model  = core.compile_model(str(kv_dir / "decoder_prefill_kv_model.xml"), device)
-        self.dc_model  = core.compile_model(str(kv_dir / "decoder_kv_model.xml"),         device)
-        self.dec_req   = None   # 1.7B 不使用 stateful decoder
-
-        _s("載入 Processor（純 numpy，1.7B 10s）…")
-        self.processor = LightProcessor(kv_dir)
-        self.pad_id    = self.processor.pad_id
-        self.cc        = opencc.OpenCC("s2twp")
-        self.ready     = True
-        _s(f"1.7B 編譯完成（{device}）")
-
-    def transcribe(
-        self,
-        audio: np.ndarray,
-        max_tokens: int = 256,
-        language: str | None = None,
-        context: str | None = None,
-    ) -> str:
-        """KV-cache 貪婪解碼：O(L²) prefill + O(n) decode。"""
-        with self._lock:
-            # 1. 前處理（10s 音訊）
-            mel, ids = self.processor.prepare(audio, language=language, context=context)
-            # audio_encoder 輸入 mel[0] 去除 batch dim → (128, 1000)
-            ae = list(self.audio_enc({"mel": mel[0]}).values())[0]   # (1, 130, 2048)
-            te = list(self.embedder({"input_ids": ids}).values())[0]  # (1, L, 2048)
-
-            # 2. 合併音頻特徵
-            combined = te.copy()
-            mask = ids[0] == self.pad_id
-            n_pad = int(mask.sum()); n_ae = ae.shape[1]
-            if n_pad != n_ae:
-                mn = min(n_pad, n_ae)
-                combined[0, np.where(mask)[0][:mn]] = ae[0, :mn]
-            else:
-                combined[0, mask] = ae[0]
-
-            # 3. Prefill
-            seq_len = combined.shape[1]
-            pos_ids = np.arange(seq_len, dtype=np.int64)[np.newaxis, :]
-            pf_out  = self.pf_model({"input_embeds": combined, "position_ids": pos_ids})
-            pf_vals = list(pf_out.values())
-            logits  = pf_vals[0]   # (1, 1, vocab)
-            past_k  = pf_vals[1]   # (28, 1, 8, L, 128)
-            past_v  = pf_vals[2]
-
-            eos = self.processor.eos_id
-            eot = self.processor.eot_id
-            next_tok = int(np.argmax(logits[0, -1, :]))
-            if next_tok in (eos, eot):
-                return ""
-
-            gen     = [next_tok]
-            cur_pos = seq_len
-
-            # 4. Decode loop
-            for _ in range(max_tokens - 1):
-                new_ids = np.array([[next_tok]], dtype=np.int64)
-                new_emb = list(self.embedder({"input_ids": new_ids}).values())[0]
-                new_pos = np.array([[cur_pos]], dtype=np.int64)
-
-                dc_out  = self.dc_model({
-                    "new_embed":   new_emb,
-                    "new_pos":     new_pos,
-                    "past_keys":   past_k,
-                    "past_values": past_v,
-                })
-                dc_vals  = list(dc_out.values())
-                logits   = dc_vals[0]
-                past_k   = dc_vals[1]
-                past_v   = dc_vals[2]
-
-                next_tok = int(np.argmax(logits[0, -1, :]))
-                if next_tok in (eos, eot):
-                    break
-                gen.append(next_tok)
-                cur_pos += 1
-
-            # 5. 解碼
-            raw = self.processor.decode(gen)
-            if "<asr_text>" in raw:
-                raw = raw.split("<asr_text>", 1)[1]
-            text = raw.strip()
-            return text if _g_output_simplified else self.cc.convert(text)
 
 
 # ══════════════════════════════════════════════════════
@@ -1174,7 +1068,7 @@ class App(ctk.CTk):
             target.insert(0, text)
 
     def _refresh_model_combo(self, model_dir: Path):
-        """主執行緒：固定顯示所有模型選項（下載邏輯由 _load_models 處理）。"""
+        """主執行緒：動態顯示模型選項。"""
         available = ["Qwen3-ASR-0.6B", "Qwen3-ASR-1.7B INT8"]
         self.model_combo.configure(values=available)
         if self.model_var.get() not in available:
@@ -1191,12 +1085,12 @@ class App(ctk.CTk):
         else:
             sz = settings.get("cpu_model_size", "0.6B")
             self.model_combo.configure(
-                values=["Qwen3-ASR-0.6B", "Qwen3-ASR-1.7B INT8"],
-                state="readonly",
+                values=["Qwen3-ASR-0.6B", "Qwen3-ASR-1.7B INT8"], state="readonly"
             )
-            self.model_var.set(
-                "Qwen3-ASR-1.7B INT8" if sz == "1.7B" else "Qwen3-ASR-0.6B"
-            )
+            if "1.7B" in sz:
+                self.model_var.set("Qwen3-ASR-1.7B INT8")
+            else:
+                self.model_var.set("Qwen3-ASR-0.6B")
 
     def _detect_all_devices(self):
         """同時偵測 OpenVINO（CPU / Intel iGPU）與 Vulkan（NVIDIA / AMD）裝置。
@@ -1859,9 +1753,11 @@ class App(ctk.CTk):
                         return
                     self.after(0, self._hide_dl_bar)
 
+            cpu_threads = int(settings.get("cpu_threads", 0))
             self.engine = ASREngine1p7B() if use_17b else ASREngine()
             try:
-                self.engine.load(device=ov_device, model_dir=model_dir, cb=self._set_status)
+                self.engine.load(device=ov_device, model_dir=model_dir, cb=self._set_status,
+                                 cpu_threads=cpu_threads)
                 self.after(0, self._on_models_ready)
             except Exception as e:
                 first_line = str(e).splitlines()[0][:120]
@@ -1889,15 +1785,12 @@ class App(ctk.CTk):
             self.model_var.set("1.7B Q8_0 (Vulkan GPU)")
             self._set_status(f"✅ 就緒（Vulkan GPU）")
         else:
-            # OpenVINO：顯示 0.6B / 1.7B，可切換
+            # OpenVINO：顯示 0.6B / 1.7B INT8
             self.model_combo.configure(
-                values=["Qwen3-ASR-0.6B", "Qwen3-ASR-1.7B INT8"],
-                state="readonly",
+                values=["Qwen3-ASR-0.6B", "Qwen3-ASR-1.7B INT8"], state="readonly"
             )
             sz = settings.get("cpu_model_size", "0.6B")
-            self.model_var.set(
-                "Qwen3-ASR-1.7B INT8" if sz == "1.7B" else "Qwen3-ASR-0.6B"
-            )
+            self.model_var.set("Qwen3-ASR-1.7B INT8" if "1.7B" in sz else "Qwen3-ASR-0.6B")
             self._set_status(f"✅ 就緒（{device}）")
 
         # 填入語系清單（模型載入後才知道 supported_languages）
@@ -2200,6 +2093,7 @@ class App(ctk.CTk):
             srt = self.engine.process_file(
                 proc_path, progress_cb=prog_cb, language=language,
                 context=context, diarize=diarize, n_speakers=n_speakers,
+                original_path=path,
             )
             elapsed = time.perf_counter() - t0
 

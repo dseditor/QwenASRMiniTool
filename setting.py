@@ -24,6 +24,7 @@ SettingsTab(CTkScrollableFrame) 整合：
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -98,6 +99,9 @@ class SettingsTab(ctk.CTkScrollableFrame):
         _hsep(self)
 
         self._build_vad_section()
+        _hsep(self)
+
+        self._build_cpu_section()
         _hsep(self)
 
         self._build_model_path_section()
@@ -296,7 +300,52 @@ class SettingsTab(ctk.CTkScrollableFrame):
             app_module.VAD_THRESHOLD = value   # type: ignore
         self._app._patch_setting("vad_threshold", round(value, 2))
 
-    # ── 5. 模型路徑 ───────────────────────────────────────────────────
+    # ── 5. CPU 效能 ───────────────────────────────────────────────────
+
+    def _build_cpu_section(self):
+        _logical = os.cpu_count() or 1
+        ctk.CTkLabel(
+            self, text="⚡ CPU 推理效能",
+            font=FONT_BODY, anchor="w",
+        ).pack(fill="x", padx=12, pady=(10, 2))
+
+        ctk.CTkLabel(
+            self,
+            text=(
+                "「自動」使用 OpenVINO 預設（約 50–70% 核心）。"
+                f"「全速」啟用所有 {_logical} 個邏輯核心，可加快推理 30–80%，"
+                "但佔用更多 CPU 資源。修改後需重新載入模型。"
+            ),
+            font=FONT_SMALL, text_color=("gray40", "#AAAAAA"), anchor="w",
+            wraplength=480, justify="left",
+        ).pack(fill="x", padx=12, pady=(0, 6))
+
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(fill="x", padx=12, pady=(0, 8))
+
+        self._cpu_seg = ctk.CTkSegmentedButton(
+            row,
+            values=["自動（省電）", f"全速（{_logical} 執行緒）"],
+            width=240, height=30, font=FONT_BODY,
+            command=self._on_cpu_change,
+        )
+        self._cpu_seg.set("自動（省電）")
+        self._cpu_seg.pack(side="left")
+
+        self._cpu_reload_hint = ctk.CTkLabel(
+            row, text="", font=FONT_SMALL,
+            text_color=("gray40", "#AAAAAA"),
+        )
+        self._cpu_reload_hint.pack(side="left", padx=(10, 0))
+
+    def _on_cpu_change(self, value: str):
+        _logical = os.cpu_count() or 1
+        n = _logical if "全速" in value else 0
+        self._app._patch_setting("cpu_threads", n)
+        self._cpu_reload_hint.configure(text="↺ 需重新載入模型生效")
+        self.after(4000, lambda: self._cpu_reload_hint.configure(text=""))
+
+    # ── 6. 模型路徑 ───────────────────────────────────────────────────
 
     def _build_model_path_section(self):
         ctk.CTkLabel(
@@ -397,7 +446,15 @@ class SettingsTab(ctk.CTkScrollableFrame):
             "簡體中文" if settings.get("output_simplified") else "繁體中文"
         )
 
-        # VAD 閾値
+        # CPU 效能
+        cpu_threads = int(settings.get("cpu_threads", 0))
+        _logical = os.cpu_count() or 1
+        if hasattr(self, "_cpu_seg"):
+            self._cpu_seg.set(
+                f"全速（{_logical} 執行緒）" if cpu_threads > 0 else "自動（省電）"
+            )
+
+        # VAD 閾值
         vad = float(settings.get("vad_threshold", 0.50))
         vad = max(0.30, min(0.80, vad))
         self._vad_slider.set(vad)

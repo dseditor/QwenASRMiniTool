@@ -78,6 +78,16 @@ GAP_SEC       = 0.08
 RT_SILENCE_CHUNKS    = 25   # ~0.8s 靜音後觸發轉錄
 RT_MAX_BUFFER_CHUNKS = 600  # ~19s 上限強制轉錄
 
+# ── ForcedAligner 相關常數 ─────────────────────────────────────────
+GPU_MODEL_DIR      = BASE_DIR / "GPUModel"
+ALIGNER_MODEL_NAME = "Qwen3-ForcedAligner-0.6B"
+
+# ── 斷句標點集合（ForcedAligner 使用）──────────────────────────────
+# 中文子句結束標點（不保留，切行後隱藏）
+_ZH_CLAUSE_END = frozenset('，。？！；：…—、·')
+# 英文子句結束標點（含逗號，讓英文逗號也觸發切行）
+_EN_SENT_END   = frozenset('.,!?;')
+
 
 # ══════════════════════════════════════════════════════
 # 共用工具函式
@@ -233,6 +243,176 @@ def _assign_ts(lines: list[str], g0: float, g1: float) -> list[tuple[float, floa
     return res
 
 
+def _find_vad_model() -> Path | None:
+    """依序在 GPUModel/ 和 ov_models/ 尋找 Silero VAD ONNX。"""
+    candidates = [
+        GPU_MODEL_DIR / "silero_vad_v4.onnx",
+        _DEFAULT_MODEL_DIR / "silero_vad_v4.onnx",
+        GPU_MODEL_DIR / "silero_vad.onnx",
+        _DEFAULT_MODEL_DIR / "silero_vad.onnx",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
+
+
+def _ts_to_subtitle_lines(
+    ts_list,
+    raw_text: str,
+    chunk_offset: float,
+    spk: str | None,
+    cc,
+    simplified: bool,
+    aligner_processor=None,
+    language: str | None = None,
+) -> list[tuple[float, float, str, str | None]]:
+    """ForcedAligner token（詞級別）+ ASR 原文（含標點）→ 字幕行。
+
+    使用 FA 的 aligner_processor.tokenize_space_lang() 產出 word_list，
+    保證與 ts_list 完全 1:1 對應。再將每個 word 映射回 raw_text 的
+    原始位置，以標點觸發切行。
+    """
+    _all_punct = _ZH_CLAUSE_END | _EN_SENT_END
+    MAX_WORDS    = 8
+    MAX_ZH_CHARS = MAX_CHARS
+    result: list[tuple[float, float, str, str | None]] = []
+
+    if not ts_list or not raw_text.strip():
+        return result
+
+    # ── 1. 用 FA 的 tokenizer 產出 word_list（與 ts_list 1:1）────────
+    lang_lower = (language or "chinese").lower()
+    if aligner_processor is not None:
+        if lang_lower == "japanese":
+            word_list = aligner_processor.tokenize_japanese(raw_text)
+        elif lang_lower == "korean":
+            if aligner_processor.ko_tokenizer is None:
+                try:
+                    from soynlp.tokenizer import LTokenizer
+                    aligner_processor.ko_tokenizer = LTokenizer(
+                        scores=aligner_processor.ko_score)
+                except ImportError:
+                    pass
+            if aligner_processor.ko_tokenizer is not None:
+                word_list = aligner_processor.tokenize_korean(
+                    aligner_processor.ko_tokenizer, raw_text)
+            else:
+                word_list = aligner_processor.tokenize_space_lang(raw_text)
+        else:
+            word_list = aligner_processor.tokenize_space_lang(raw_text)
+    else:
+        # Fallback: 模擬 tokenize_space_lang（相容舊路徑）
+        word_list = []
+        for seg in raw_text.split():
+            cleaned = "".join(c for c in seg
+                              if c.isalpha() or c.isdigit() or c == "'")
+            if not cleaned:
+                continue
+            buf = ""
+            for c in cleaned:
+                if '\u4e00' <= c <= '\u9fff':
+                    if buf:
+                        word_list.append(buf); buf = ""
+                    word_list.append(c)
+                else:
+                    buf += c
+            if buf:
+                word_list.append(buf)
+
+    # 取 min 以防長度不一致（防禦性）
+    n = min(len(word_list), len(ts_list))
+
+    # ── 2. 為每個 word 在 raw_text 中找到對應位置 ────────────────────
+    #    並記錄「在這個 word 之前有哪些標點」→ 用於切行
+    seg_tokens: list = []      # 當前行的 FA token
+    seg_words: list[str] = []  # 當前行的原始 word
+    ri = 0                     # raw_text 掃描位置
+
+    def _is_latin_word(w: str) -> bool:
+        return any(c.isascii() and c.isalpha() for c in w)
+
+    def _emit():
+        nonlocal seg_tokens, seg_words
+        if not seg_tokens:
+            seg_tokens = []
+            seg_words  = []
+            return
+        start = chunk_offset + seg_tokens[0].start_time
+        end   = chunk_offset + seg_tokens[-1].end_time
+        # 重建文字：有拉丁詞用空格 join，純中文直接 join
+        if any(_is_latin_word(w) for w in seg_words):
+            text = " ".join(seg_words)
+        else:
+            text = "".join(seg_words)
+        if not simplified and cc is not None:
+            text = cc.convert(text)
+        if end > start and text.strip():
+            result.append((start, end, text.strip(), spk))
+        seg_tokens = []
+        seg_words  = []
+
+    def _over_limit() -> bool:
+        if any(_is_latin_word(w) for w in seg_words):
+            return len(seg_words) > MAX_WORDS
+        return sum(len(w) for w in seg_words) > MAX_ZH_CHARS
+
+    for wi in range(n):
+        word = word_list[wi]
+        tok  = ts_list[wi]     # ForcedAlignItem: .text, .start_time, .end_time
+
+        # 在 raw_text 中前進到 word 的位置（跳過標點和空格）
+        # 遇到標點 → 切行
+        hit_punct = False
+        while ri < len(raw_text):
+            c = raw_text[ri]
+            if c in _all_punct:
+                hit_punct = True
+                ri += 1
+                continue
+            if c == " ":
+                ri += 1
+                continue
+            break  # 到達下一個有效字元
+
+        if hit_punct:
+            _emit()  # 標點前的內容先輸出
+
+        seg_tokens.append(tok)
+        seg_words.append(word)
+
+        # 在 raw_text 中跳過 word 佔用的字元
+        consumed = 0
+        word_len = len(word)
+        while ri < len(raw_text) and consumed < word_len:
+            c = raw_text[ri]
+            if c in _all_punct or c == " ":
+                ri += 1
+                continue
+            ri += 1
+            consumed += 1
+
+        # MAX_CHARS / MAX_WORDS 保護
+        if _over_limit():
+            _emit()
+
+    # ── 3. 清空剩餘 ──────────────────────────────────────────────────
+    _emit()
+    return result
+
+
+def _rebuild_text_with_spaces(raw_chars: list[str]) -> str:
+    """以 raw_text 的字元序列（含空格）重建可讀字幕文字（輔助函式，保留相容）。"""
+    result: list[str] = []
+    for ch in raw_chars:
+        if ch == " ":
+            if result and result[-1] != " ":
+                result.append(" ")
+        else:
+            result.append(ch)
+    return "".join(result).strip()
+
+
 # 全域：是否輸出簡體中文（True = 跳過 OpenCC 繁化）
 _g_output_simplified: bool = False
 
@@ -256,6 +436,8 @@ class ASREngine:
         self.pad_id      = None
         self.cc          = None
         self.diar_engine = None   # DiarizationEngine（可選）
+        self.aligner     = None   # Qwen3ForcedAligner（可選，CPU）
+        self.use_aligner = False  # 是否啟用時間軸對齊
 
     def load(self, device: str = "CPU", model_dir: Path = None, cb=None, cpu_threads: int = 0):
         """從背景執行緒呼叫。cb(msg) 用於更新 UI 狀態。
@@ -309,8 +491,39 @@ class ASREngine:
         self.processor = LightProcessor(ov_dir)
         self.pad_id    = self.processor.pad_id
         self.cc        = opencc.OpenCC("s2twp")
+
+        # ── ForcedAligner（可選，CPU PyTorch，不需 CUDA）──────────────
+        self.aligner     = None
+        self.use_aligner = False
+        aligner_path = GPU_MODEL_DIR / ALIGNER_MODEL_NAME
+        if aligner_path.exists():
+            try:
+                _s(f"載入時間軸對齊模型（{ALIGNER_MODEL_NAME}，CPU）…")
+                import torch
+                from qwen_asr import Qwen3ForcedAligner
+                self.aligner = Qwen3ForcedAligner.from_pretrained(
+                    str(aligner_path),
+                    device_map="cpu",
+                    dtype=torch.float32,
+                )
+                self.use_aligner = True
+                _s(f"時間軸對齊模型就緒（CPU）")
+            except Exception as _e:
+                _s(f"⚠ ForcedAligner 載入失敗（{_e}），改用比例估算")
+                self.aligner     = None
+                self.use_aligner = False
+
+        # 抑制 "Setting pad_token_id to eos_token_id" 重複警告
+        try:
+            import transformers.utils.logging as _tf_logging
+            import logging as _logging
+            _tf_logging.get_logger("transformers.generation.utils").setLevel(_logging.ERROR)
+        except Exception:
+            pass
+
         self.ready     = True
-        _s(f"編譯完成（{device}）")
+        aligner_info = "  + ForcedAligner" if self.use_aligner else ""
+        _s(f"編譯完成（{device}{aligner_info}）")
 
     def transcribe(
         self,
@@ -446,14 +659,80 @@ class ASREngine:
                 spk_info = f" [{spk}]" if spk else ""
                 progress_cb(i, total,
                             f"[{i+1}/{total}] {g0:.1f}s~{g1:.1f}s{spk_info}")
+
+            # ── ASR 轉錄（取簡體原始輸出，對齊後再繁化）─────────────────
             max_tok = 400 if language == "Japanese" else 300
-            text = self.transcribe(chunk, max_tokens=max_tok, language=language, context=context)
-            if not text:
+            with self._lock:
+                mel, ids = self.processor.prepare(
+                    chunk, language=language, context=context)
+                ae = list(self.audio_enc({"mel": mel}).values())[0]
+                te = list(self.embedder({"input_ids": ids}).values())[0]
+                combined = te.copy()
+                mask = ids[0] == self.pad_id
+                np_ = int(mask.sum()); na = ae.shape[1]
+                if np_ != na:
+                    mn = min(np_, na)
+                    combined[0, np.where(mask)[0][:mn]] = ae[0, :mn]
+                else:
+                    combined[0, mask] = ae[0]
+                L   = combined.shape[1]
+                pos = np.arange(L, dtype=np.int64)[np.newaxis, :]
+                self.dec_req.reset_state()
+                out    = self.dec_req.infer({0: combined, "position_ids": pos})
+                logits = list(out.values())[0]
+                eos = self.processor.eos_id
+                eot = self.processor.eot_id
+                gen: list[int] = []
+                nxt = int(np.argmax(logits[0, -1, :])); cur = L
+                while nxt not in (eos, eot) and len(gen) < max_tok:
+                    gen.append(nxt)
+                    emb = list(self.embedder(
+                        {"input_ids": np.array([[nxt]], dtype=np.int64)}
+                    ).values())[0]
+                    out    = self.dec_req.infer(
+                        {0: emb, "position_ids": np.array([[cur]], dtype=np.int64)}
+                    )
+                    logits = list(out.values())[0]
+                    nxt = int(np.argmax(logits[0, -1, :])); cur += 1
+                raw_decoded = self.processor.decode(gen)
+                if "<asr_text>" in raw_decoded:
+                    raw_decoded = raw_decoded.split("<asr_text>", 1)[1]
+                raw_text = raw_decoded.strip()
+
+            if not raw_text:
                 continue
-            lines = _split_to_lines(text)
-            all_subs.extend(
-                (s, e, line, spk) for s, e, line in _assign_ts(lines, g0, g1)
-            )
+
+            # ── ForcedAligner 精確時間軸對齊 ─────────────────────────────
+            aligned = False
+            if self.use_aligner and self.aligner is not None:
+                try:
+                    align_lang = language or "Chinese"
+                    align_results = self.aligner.align(
+                        audio=(chunk, SAMPLE_RATE),
+                        text=raw_text,
+                        language=align_lang,
+                    )
+                    ts_list = align_results[0] if align_results else []
+                    if ts_list:
+                        subs = _ts_to_subtitle_lines(
+                            ts_list, raw_text, g0, spk,
+                            self.cc, _g_output_simplified,
+                            aligner_processor=self.aligner.aligner_processor,
+                            language=align_lang,
+                        )
+                        if subs:
+                            all_subs.extend(subs)
+                            aligned = True
+                except Exception:
+                    aligned = False  # 靜默 fallback 到比例估算
+
+            if not aligned:
+                # ── 比例估算 Fallback ──────────────────────────────────────
+                text = raw_text if _g_output_simplified else self.cc.convert(raw_text)
+                lines = _split_to_lines(text)
+                all_subs.extend(
+                    (s, e, line, spk) for s, e, line in _assign_ts(lines, g0, g1)
+                )
 
         if not all_subs:
             return None
@@ -848,6 +1127,16 @@ class App(ctk.CTk):
         self.n_spk_combo.set("自動")
         self.n_spk_combo.pack(side="left")
 
+        # ── 時間軸對齊 checkbox（ForcedAligner 載入後才啟用）────────────
+        self._align_var = ctk.BooleanVar(value=True)
+        self.align_chk = ctk.CTkCheckBox(
+            row2, text="時間軸對齊",
+            variable=self._align_var,
+            font=FONT_BODY, state="disabled",
+            command=self._on_align_toggle,
+        )
+        self.align_chk.pack(side="left", padx=(18, 0))
+
         # 辨識提示（Hint / Context）
         hint_hdr = ctk.CTkFrame(parent, fg_color="transparent")
         hint_hdr.pack(fill="x", padx=8, pady=(6, 0))
@@ -1006,6 +1295,13 @@ class App(ctk.CTk):
         """說話者分離 checkbox 切換時，同步啟用／停用人數選擇器。"""
         state = "readonly" if self._diarize_var.get() else "disabled"
         self.n_spk_combo.configure(state=state)
+
+    # ── 時間軸對齊 UI ──────────────────────────────────
+
+    def _on_align_toggle(self):
+        """動態切換 ForcedAligner 啟用狀態（不需重新載入模型）。"""
+        if hasattr(self.engine, 'aligner') and self.engine.aligner is not None:
+            self.engine.use_aligner = self._align_var.get()
 
     # ── Hint 輸入輔助 ─────────────────────────────────────────────────
 
@@ -1819,6 +2115,14 @@ class App(ctk.CTk):
             threading.Thread(
                 target=self._check_diarization_models, daemon=True
             ).start()
+
+        # ForcedAligner checkbox：載入成功 → 啟用；否則 → 停用並取消勾選
+        if hasattr(self, 'align_chk'):
+            if hasattr(self.engine, 'use_aligner') and self.engine.use_aligner:
+                self.align_chk.configure(state="normal")
+            else:
+                self.align_chk.configure(state="disabled")
+                self._align_var.set(False)
 
     # ── 說話者分離模型：啟動時檢查 + 按需下載 ─────────────────────────
 

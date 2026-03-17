@@ -599,6 +599,8 @@ class ChatLLMASREngine:
         self.cc          = None
         self._runner: _DLLASRRunner | _ChatLLMRunner | None = None
         self._use_dll    = False   # 記錄目前使用哪種模式
+        self.aligner     = None   # Qwen3ForcedAligner（可選，CPU）
+        self.use_aligner = False  # 是否啟用時間軸對齊
 
     # ── 載入 ──────────────────────────────────────────────────────────
 
@@ -679,6 +681,9 @@ class ChatLLMASREngine:
                 self._use_dll = True
                 self.ready = True
                 _s("ChatLLM DLL 載入完成（模型常駐 GPU，每 chunk ~0.23s）")
+
+                # ── ForcedAligner（可選，CPU PyTorch，不需 CUDA）────────
+                self._load_aligner(cb=cb)
                 return
             except Exception as e:
                 _s(f"DLL 模式失敗（{e}），改用 subprocess 模式…")
@@ -693,6 +698,9 @@ class ChatLLMASREngine:
         self._use_dll = False
         self.ready = True
         _s("ChatLLM 載入完成（subprocess 模式，Vulkan GPU）")
+
+        # ── ForcedAligner（可選，CPU PyTorch，不需 CUDA）──────────────
+        self._load_aligner(cb=cb)
 
     # ── 單段轉錄 ──────────────────────────────────────────────────────
 
@@ -737,6 +745,41 @@ class ChatLLMASREngine:
 
         return text
 
+    # ── ForcedAligner 載入 ────────────────────────────────────────────
+
+    def _load_aligner(self, cb=None):
+        """載入 Qwen3-ForcedAligner-0.6B（CPU），失敗時靜默忽略。"""
+        def _s(msg):
+            if cb: cb(msg)
+
+        _ALIGNER_MODEL_NAME = "Qwen3-ForcedAligner-0.6B"
+        aligner_path = BASE_DIR / "GPUModel" / _ALIGNER_MODEL_NAME
+        if not aligner_path.exists():
+            return
+        try:
+            _s(f"載入時間軸對齊模型（{_ALIGNER_MODEL_NAME}，CPU）…")
+            import torch
+            from qwen_asr import Qwen3ForcedAligner
+            self.aligner = Qwen3ForcedAligner.from_pretrained(
+                str(aligner_path),
+                device_map="cpu",
+                dtype=torch.float32,
+            )
+            self.use_aligner = True
+            _s(f"時間軸對齊模型就緒（CPU）")
+        except Exception as _e:
+            _s(f"⚠ ForcedAligner 載入失敗（{_e}），改用比例估算")
+            self.aligner     = None
+            self.use_aligner = False
+
+        # 抑制 "Setting pad_token_id to eos_token_id" 重複警告
+        try:
+            import transformers.utils.logging as _tf_logging
+            import logging as _logging
+            _tf_logging.get_logger("transformers.generation.utils").setLevel(_logging.ERROR)
+        except Exception:
+            pass
+
     # ── chunk 長度限制 ─────────────────────────────────────────────────
 
     def _enforce_chunk_limit(
@@ -770,6 +813,7 @@ class ChatLLMASREngine:
         context:    str | None = None,
         diarize:    bool = False,
         n_speakers: int | None = None,
+        original_path: Path | None = None,
     ) -> Path | None:
         import librosa
 
@@ -795,19 +839,82 @@ class ChatLLMASREngine:
 
         groups_spk = self._enforce_chunk_limit(groups_spk)
 
+        # ── 導入 _ts_to_subtitle_lines（避免循環 import，延遲導入）─────────
+        _ts_fn = None
+        if self.use_aligner and self.aligner is not None:
+            try:
+                from app import _ts_to_subtitle_lines
+                _ts_fn = _ts_to_subtitle_lines
+            except ImportError:
+                pass
+
         all_subs: list[tuple[float, float, str, str | None]] = []
         total = len(groups_spk)
         for i, (g0, g1, chunk, spk) in enumerate(groups_spk):
             if progress_cb:
                 spk_info = f" [{spk}]" if spk else ""
                 progress_cb(i, total, f"[{i+1}/{total}] {g0:.1f}s~{g1:.1f}s{spk_info}")
-            text = self.transcribe(chunk, language=language, context=context)
-            if not text:
+
+            # ── 轉錄（取原始簡體輸出，對齊後再繁化）─────────────────────
+            import soundfile as sf
+            sys_prompt: str | None = None
+            if language and language != "自動偵測":
+                code = _LANG_CODE.get(language, language.lower()[:2])
+                sys_prompt = (
+                    f"The audio language is {language}. "
+                    f"Transcribe it and output strictly in this format: "
+                    f"language {code}<asr_text>[transcription]. "
+                    f"Output only {language} text after <asr_text>, no translation."
+                )
+
+            import tempfile as _tempfile
+            with _tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+                tmp_path = tf.name
+            try:
+                sf.write(tmp_path, chunk, SAMPLE_RATE, subtype="PCM_16")
+                raw_text = self._runner.transcribe(tmp_path, sys_prompt=sys_prompt)
+            finally:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
+            if not raw_text:
                 continue
-            lines = _split_to_lines(text)
-            all_subs.extend(
-                (s, e, line, spk) for s, e, line in _assign_ts(lines, g0, g1)
-            )
+
+            # ── ForcedAligner 精確時間軸對齊 ─────────────────────────────
+            aligned = False
+            if self.use_aligner and self.aligner is not None and _ts_fn is not None:
+                try:
+                    align_lang = language or "Chinese"
+                    align_results = self.aligner.align(
+                        audio=(chunk, SAMPLE_RATE),
+                        text=raw_text,
+                        language=align_lang,
+                    )
+                    ts_list = align_results[0] if align_results else []
+                    if ts_list:
+                        subs = _ts_fn(
+                            ts_list, raw_text, g0, spk,
+                            self.cc, _output_simplified,
+                            aligner_processor=self.aligner.aligner_processor,
+                            language=align_lang,
+                        )
+                        if subs:
+                            all_subs.extend(subs)
+                            aligned = True
+                except Exception:
+                    aligned = False
+
+            if not aligned:
+                # ── 比例估算 Fallback ──────────────────────────────────────
+                text = raw_text
+                if self.cc and not _output_simplified:
+                    text = self.cc.convert(raw_text)
+                lines = _split_to_lines(text)
+                all_subs.extend(
+                    (s, e, line, spk) for s, e, line in _assign_ts(lines, g0, g1)
+                )
 
         if not all_subs:
             return None
@@ -815,8 +922,9 @@ class ChatLLMASREngine:
         if progress_cb:
             progress_cb(total, total, "寫入 SRT…")
 
-        SRT_DIR.mkdir(exist_ok=True)
-        out = SRT_DIR / (audio_path.stem + ".srt")
+        # 以原始檔案的目錄與檔名輸出（影片抽音軌時 audio_path 是暫存路徑）
+        ref = original_path if original_path is not None else audio_path
+        out = ref.parent / (ref.stem + ".srt")
         with open(out, "w", encoding="utf-8") as f:
             for idx, (s, e, line, spk) in enumerate(all_subs, 1):
                 prefix = f"{spk}：" if spk else ""
@@ -825,3 +933,4 @@ class ChatLLMASREngine:
 
     def __del__(self):
         pass   # DLL runner 由 GC 自然回收（ctypes callback 會被 GC 清理）
+

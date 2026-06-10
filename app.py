@@ -1820,8 +1820,11 @@ class App(ctk.CTk):
                         _DEFAULT_MODEL_DIR.mkdir(parents=True, exist_ok=True)
                         _download_file(_VAD_URL, vad_dest)
 
-                    # 下載 chatllm .bin 模型（ModelScope）
-                    bin_dest = _BIN_PATH
+                    # 下載 chatllm .bin 模型至「使用者指定的模型資料夾」。
+                    # 注意：model_path 變數此處實為資料夾（path_var）。
+                    # 舊版寫死 _BIN_PATH（EXE 旁），導致使用者指定路徑無效、
+                    # 即使該資料夾已有 .bin 仍強制下載。改為以 model_dir 為準。
+                    bin_dest = model_path / "qwen3-asr-1.7b.bin"
                     bin_dest.parent.mkdir(parents=True, exist_ok=True)
                     if not bin_dest.exists():
                         self._set_status("⬇ 下載 chatllm 模型（~2.3 GB）…")
@@ -1866,7 +1869,7 @@ class App(ctk.CTk):
                         "backend":      "chatllm",
                         "device":       gpu_label,
                         "model_dir":    str(model_path),
-                        "model_path":   str(_BIN_PATH),
+                        "model_path":   str(bin_dest),
                         "chatllm_dir":  str(cl_dir),
                     }
 
@@ -1950,6 +1953,18 @@ class App(ctk.CTk):
             _saved_mdl  = settings.get("model_path") or settings.get("gguf_path") or str(_BIN_PATH)
             model_path  = Path(_saved_mdl)
             chatllm_dir = Path(settings.get("chatllm_dir", str(_CHATLLM_DIR)))
+
+            # 若記住的 .bin 不存在，依序在「使用者指定的模型資料夾」與預設
+            # _BIN_PATH 內尋找同名 .bin，避免明明已有檔案卻強制重新下載。
+            if not model_path.exists():
+                for _cand in (
+                    Path(settings.get("model_dir", "")) / "qwen3-asr-1.7b.bin"
+                        if settings.get("model_dir") else None,
+                    _BIN_PATH,
+                ):
+                    if _cand is not None and _cand.exists():
+                        model_path = _cand
+                        break
 
             # chatllm .bin 是否存在
             if not model_path.exists():

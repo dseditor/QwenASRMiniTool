@@ -127,68 +127,66 @@ REM Chinese Windows (cp950 default encoding).
     %SRC%\app.py
 
 echo.
-IF EXIST "%SRC%\dist2\QwenASR\QwenASR.exe" (
-    echo ===================================================
-    echo  Build SUCCESS - Copying chatllm + GPU scripts...
-    echo ===================================================
+REM NOTE: a GOTO flow (not IF (...) ELSE (...)) is used below on purpose.
+REM The post-build messages contain parentheses, e.g. "(CPU / Vulkan edition)".
+REM Inside a parenthesized IF block cmd counts parens, so any such text could
+REM close the block early and run the ELSE branch ("Build FAILED") by mistake.
+REM GOTO removes the enclosing parens entirely, making echo text paren-safe.
+IF NOT EXIST "%SRC%\dist2\QwenASR\QwenASR.exe" GOTO :build_failed
 
-    REM Copy the ENTIRE chatllm folder (v2026.05 release binaries) to
-    REM dist2\QwenASR\chatllm\. These power the Vulkan GPU + CPU backend
-    REM (libchatllm.dll loaded via ctypes; main.exe for --show_devices).
-    REM Whole-folder copy keeps every ggml-cpu-* variant and stays in sync
-    REM with future chatllm releases without editing this script.
-    IF EXIST "%SRC%\chatllm\libchatllm.dll" (
-        xcopy "%SRC%\chatllm\*" "%SRC%\dist2\QwenASR\chatllm\" /E /I /Y /Q
-        echo  chatllm/    : full folder copied to dist2\QwenASR\chatllm\
-    ) ELSE (
-        echo  WARNING: chatllm\libchatllm.dll not found - GPU backend unavailable
-        echo  Place the chatllm release binaries in %SRC%\chatllm\ before building.
-    )
+echo ===================================================
+echo  Build SUCCESS - Copying chatllm + GPU scripts...
+echo ===================================================
 
-    echo.
-    REM Copy bundled ffmpeg.exe to dist2\QwenASR\ffmpeg\
-    REM ffmpeg_utils.find_ffmpeg() searches <exe_dir>/ffmpeg/ffmpeg.exe first
-    REM when running as a frozen EXE (sys.frozen=True).
-    IF EXIST "%SRC%\ffmpeg\ffmpeg.exe" (
-        IF NOT EXIST "%SRC%\dist2\QwenASR\ffmpeg\" mkdir "%SRC%\dist2\QwenASR\ffmpeg\"
-        xcopy "%SRC%\ffmpeg\ffmpeg.exe" "%SRC%\dist2\QwenASR\ffmpeg\" /Y /Q
-        echo  ffmpeg/     : ffmpeg.exe copied to dist2\QwenASR\ffmpeg\
-    ) ELSE (
-        echo  WARNING: ffmpeg\ffmpeg.exe not found - users will be prompted to download at runtime
-    )
+REM Copy the ENTIRE chatllm folder (v2026.05 release binaries) to
+REM dist2\QwenASR\chatllm\. Whole-folder copy keeps every ggml-cpu-*
+REM variant and stays in sync with future chatllm releases.
+IF NOT EXIST "%SRC%\chatllm\libchatllm.dll" GOTO :no_chatllm
+xcopy "%SRC%\chatllm\*" "%SRC%\dist2\QwenASR\chatllm\" /E /I /Y /Q
+echo  chatllm/    : full folder copied to dist2\QwenASR\chatllm\
+GOTO :after_chatllm
+:no_chatllm
+echo  WARNING: chatllm\libchatllm.dll not found - GPU backend unavailable
+echo  Place the chatllm release binaries in %SRC%\chatllm\ before building.
+:after_chatllm
 
-    echo.
-    REM ===== GPU edition scripts (PyTorch CUDA, runs on system Python) =====
-    REM These are NOT frozen into the EXE. start-gpu.bat builds a venv-gpu
-    REM and downloads the GPU model on first run. The loose .py sources that
-    REM app-gpu.py / streamlit_vulkan.py import are copied to the app ROOT so
-    REM start-gpu.bat (SCRIPT_DIR = root) can find GPUModel\, ov_models\ and
-    REM app-gpu.py beside itself - exactly as in the source repo layout.
-    FOR %%F IN (app-gpu.py streamlit_vulkan.py streamlit_app.py subtitle_editor.py batch_tab.py diarize.py ffmpeg_utils.py chatllm_engine.py processor_numpy.py downloader.py generate_srt.py version.py updater.py requirements-gpu.txt start-gpu.bat) DO IF EXIST "%SRC%\%%F" xcopy "%SRC%\%%F" "%SRC%\dist2\QwenASR\" /Y /Q >nul
-    REM setting.py / prompt_template.json already live inside _internal\ for the
-    REM frozen app; copy loose versions to root too so the GPU app imports them.
-    IF EXIST "%SRC%\setting.py"          xcopy "%SRC%\setting.py"          "%SRC%\dist2\QwenASR\" /Y /Q >nul
-    IF EXIST "%SRC%\prompt_template.json" xcopy "%SRC%\prompt_template.json" "%SRC%\dist2\QwenASR\" /Y /Q >nul
-    echo  GPU edn     : scripts copied to app root (start-gpu.bat, app-gpu.py)
+echo.
+REM Copy bundled ffmpeg.exe to dist2\QwenASR\ffmpeg\
+IF NOT EXIST "%SRC%\ffmpeg\ffmpeg.exe" GOTO :no_ffmpeg
+IF NOT EXIST "%SRC%\dist2\QwenASR\ffmpeg\" mkdir "%SRC%\dist2\QwenASR\ffmpeg\"
+xcopy "%SRC%\ffmpeg\ffmpeg.exe" "%SRC%\dist2\QwenASR\ffmpeg\" /Y /Q
+echo  ffmpeg/     : ffmpeg.exe copied to dist2\QwenASR\ffmpeg\
+GOTO :after_ffmpeg
+:no_ffmpeg
+echo  WARNING: ffmpeg\ffmpeg.exe not found - users download it at runtime
+:after_ffmpeg
 
-    echo.
-    echo  Launcher : dist2\QwenASR\QwenASR.exe   (CPU / Vulkan edition)
-    echo  Runtime  : dist2\QwenASR\_internal\
-    echo  GPU DLLs : dist2\QwenASR\chatllm\      (~71 MB, Vulkan backend)
-    echo  ffmpeg   : dist2\QwenASR\ffmpeg\ffmpeg.exe  (video support)
-    echo  GPU edn  : dist2\QwenASR\start-gpu.bat (PyTorch CUDA, app-gpu.py)
-    echo  Update   : in-app check in Settings tab (GitHub Releases)
-    echo.
-    echo  Model downloaded at first run from:
-    echo    https://huggingface.co/dseditor/Collection/resolve/main/qwen3-asr-1.7b.bin
-    echo  Saved to: {app}\GPUModel\qwen3-asr-1.7b.bin  (~2.3 GB)
-    echo.
-    echo  Next step: run make_release_zip.bat to produce
-    echo  QwenASR_^<version^>.zip for a GitHub Release (auto-update source).
-    echo ===================================================
-) ELSE (
-    echo ===================================================
-    echo  Build FAILED. Check output above.
-    echo ===================================================
-)
+echo.
+REM ===== GPU edition scripts (PyTorch CUDA, runs on system Python) =====
+REM Copied to the app ROOT so start-gpu.bat finds GPUModel\, ov_models\
+REM and app-gpu.py beside itself, exactly as in the source repo layout.
+FOR %%F IN (app-gpu.py streamlit_vulkan.py streamlit_app.py subtitle_editor.py batch_tab.py diarize.py ffmpeg_utils.py chatllm_engine.py processor_numpy.py downloader.py generate_srt.py version.py updater.py requirements-gpu.txt start-gpu.bat) DO IF EXIST "%SRC%\%%F" xcopy "%SRC%\%%F" "%SRC%\dist2\QwenASR\" /Y /Q >nul
+IF EXIST "%SRC%\setting.py"           xcopy "%SRC%\setting.py"           "%SRC%\dist2\QwenASR\" /Y /Q >nul
+IF EXIST "%SRC%\prompt_template.json" xcopy "%SRC%\prompt_template.json" "%SRC%\dist2\QwenASR\" /Y /Q >nul
+echo  GPU edn     : scripts copied to app root (start-gpu.bat, app-gpu.py)
+
+echo.
+echo  Launcher : dist2\QwenASR\QwenASR.exe   (CPU / Vulkan edition)
+echo  Runtime  : dist2\QwenASR\_internal\
+echo  GPU DLLs : dist2\QwenASR\chatllm\      (~71 MB, Vulkan backend)
+echo  ffmpeg   : dist2\QwenASR\ffmpeg\ffmpeg.exe  (video support)
+echo  GPU edn  : dist2\QwenASR\start-gpu.bat (PyTorch CUDA, app-gpu.py)
+echo  Update   : in-app check in Settings tab (GitHub Releases)
+echo.
+echo  Next step: run make_release_zip.bat to produce
+echo  QwenASR_^<version^>.zip for a GitHub Release (auto-update source).
+echo ===================================================
+GOTO :build_end
+
+:build_failed
+echo ===================================================
+echo  Build FAILED. Check output above.
+echo ===================================================
+
+:build_end
 pause

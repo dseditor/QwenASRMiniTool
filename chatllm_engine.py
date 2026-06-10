@@ -12,6 +12,7 @@ chatllm_engine.py — ChatLLM.cpp + Vulkan 推理後端
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import re
 import subprocess
@@ -622,6 +623,7 @@ class ChatLLMASREngine:
         self._model_path   = Path(model_path)
         self._chatllm_dir  = Path(chatllm_dir)
         self._n_gpu_layers = n_gpu_layers
+        self._device_id    = device_id   # FA 對齊的 -ngl {id}:all 需要
 
         # ── VAD ──────────────────────────────────────────────────────
         _s("載入 VAD 模型…")
@@ -747,38 +749,110 @@ class ChatLLMASREngine:
 
     # ── ForcedAligner 載入 ────────────────────────────────────────────
 
+    # FA chatllm 模型檔名（與 ASR .bin 同資料夾）
+    FA_BIN_NAME = "qwen3-focedaligner-0.6b.bin"
+
     def _load_aligner(self, cb=None):
-        """載入 Qwen3-ForcedAligner-0.6B（CPU），失敗時靜默忽略。"""
+        """偵測 chatllm 版 ForcedAligner .bin（純 chatllm，無需 torch）。
+
+        chatllm.cpp 原生支援 Qwen3ForcedAligner：給「參考文字 + 音訊」即可
+        輸出字級毫秒時間軸（format json）。此處只驗證 .bin 可用，實際對齊
+        在 _align_chunk() 以 subprocess 呼叫 main.exe 完成。失敗時靜默退回
+        比例估算。
+        """
         def _s(msg):
             if cb: cb(msg)
 
-        _ALIGNER_MODEL_NAME = "Qwen3-ForcedAligner-0.6B"
-        aligner_path = BASE_DIR / "GPUModel" / _ALIGNER_MODEL_NAME
-        if not aligner_path.exists():
+        self.aligner     = None
+        self.use_aligner = False
+        self._fa_bin     = None
+
+        # FA .bin 與 ASR .bin 放同一資料夾（尊重使用者指定的 model_dir）
+        fa_path = self._model_path.parent / self.FA_BIN_NAME
+        if not fa_path.exists():
             return
         try:
-            _s(f"載入時間軸對齊模型（{_ALIGNER_MODEL_NAME}，CPU）…")
-            import torch
-            from qwen_asr import Qwen3ForcedAligner
-            self.aligner = Qwen3ForcedAligner.from_pretrained(
-                str(aligner_path),
-                device_map="cpu",
-                dtype=torch.float32,
+            _s("驗證時間軸對齊模型（chatllm ForcedAligner）…")
+            exe = self._chatllm_dir / "main.exe"
+            r = subprocess.run(
+                [str(exe), "-m", str(fa_path), "-ngl", "0",
+                 "--hide_banner", "--show"],
+                capture_output=True, stdin=subprocess.DEVNULL,
+                text=True, encoding="utf-8", errors="replace",
+                timeout=30, cwd=str(self._chatllm_dir),
+                creationflags=_CREATE_NO_WINDOW, startupinfo=_STARTUP_INFO,
             )
+            out = r.stdout + r.stderr
+            if "ForcedAligner" not in out:
+                _s("⚠ FA 模型驗證失敗，改用比例估算")
+                return
+            self._fa_bin     = fa_path
+            self.aligner     = True   # 旗標（沿用 use_aligner 判斷流程）
             self.use_aligner = True
-            _s(f"時間軸對齊模型就緒（CPU）")
+            _s("時間軸對齊模型就緒（chatllm，無需 torch）")
         except Exception as _e:
             _s(f"⚠ ForcedAligner 載入失敗（{_e}），改用比例估算")
             self.aligner     = None
             self.use_aligner = False
+            self._fa_bin     = None
 
-        # 抑制 "Setting pad_token_id to eos_token_id" 重複警告
+    def _align_chunk(
+        self,
+        wav_path:  str,
+        ref_text:  str,
+        language:  str = "Chinese",
+    ) -> list[tuple[str, float, float]]:
+        """以 chatllm ForcedAligner 對齊「參考文字 + 音訊」，回傳字級時間軸。
+
+        回傳 [(word, start_sec, end_sec), ...]；失敗或無輸出時回傳 []。
+        """
+        if not self._fa_bin:
+            return []
+
+        # CPU → -ngl 0；GPU → -ngl {device_id}:all（與 ASR 同裝置）
+        gpu_args = (["-ngl", f"{self._device_id}:all"]
+                    if self._n_gpu_layers > 0 else ["-ngl", "0"])
+        exe = self._chatllm_dir / "main.exe"
+        prompt = f"{ref_text}{{{{audio:{wav_path}}}}}"
+        cmd = [
+            str(exe), "-m", str(self._fa_bin), *gpu_args, "--hide_banner",
+            "--multimedia_file_tags", "{{", "}}",
+            "-p", prompt,
+            "--set", "format", "json",
+            "--set", "language", language,
+        ]
         try:
-            import transformers.utils.logging as _tf_logging
-            import logging as _logging
-            _tf_logging.get_logger("transformers.generation.utils").setLevel(_logging.ERROR)
+            r = subprocess.run(
+                cmd, capture_output=True, stdin=subprocess.DEVNULL,
+                text=True, encoding="utf-8", errors="replace",
+                timeout=120, cwd=str(self._chatllm_dir),
+                creationflags=_CREATE_NO_WINDOW, startupinfo=_STARTUP_INFO,
+            )
         except Exception:
-            pass
+            return []
+
+        out = r.stdout + r.stderr
+        # 擷取 JSON 陣列（main.exe 末尾會附 timings 文字，需先切出 [...]）
+        i = out.find("[")
+        j = out.rfind("]")
+        if i < 0 or j <= i:
+            return []
+        try:
+            data = json.loads(out[i:j + 1])
+        except (ValueError, json.JSONDecodeError):
+            return []
+
+        items: list[tuple[str, float, float]] = []
+        for d in data:
+            try:
+                w  = str(d["text"])
+                s  = float(d["start"]) / 1000.0   # 毫秒 → 秒
+                e  = float(d["end"])   / 1000.0
+            except (KeyError, TypeError, ValueError):
+                continue
+            if w.strip():
+                items.append((w, s, e))
+        return items
 
     # ── chunk 長度限制 ─────────────────────────────────────────────────
 
@@ -839,12 +913,12 @@ class ChatLLMASREngine:
 
         groups_spk = self._enforce_chunk_limit(groups_spk)
 
-        # ── 導入 _ts_to_subtitle_lines（避免循環 import，延遲導入）─────────
+        # ── 導入 chatllm 版斷句函式（避免循環 import，延遲導入）─────────
         _ts_fn = None
-        if self.use_aligner and self.aligner is not None:
+        if self.use_aligner and self._fa_bin is not None:
             try:
-                from app import _ts_to_subtitle_lines
-                _ts_fn = _ts_to_subtitle_lines
+                from app import _ts_chatllm_to_subtitle_lines
+                _ts_fn = _ts_chatllm_to_subtitle_lines
             except ImportError:
                 pass
 
@@ -870,9 +944,33 @@ class ChatLLMASREngine:
             import tempfile as _tempfile
             with _tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
                 tmp_path = tf.name
+            aligned  = False
+            raw_text = ""
             try:
                 sf.write(tmp_path, chunk, SAMPLE_RATE, subtype="PCM_16")
                 raw_text = self._runner.transcribe(tmp_path, sys_prompt=sys_prompt)
+
+                if not raw_text:
+                    continue
+
+                # ── ForcedAligner 精確時間軸對齊（chatllm .bin，無需 torch）──
+                #    重用同一個暫存 wav，避免重複寫檔。
+                if self.use_aligner and self._fa_bin is not None and _ts_fn is not None:
+                    try:
+                        align_lang = (language
+                                      if (language and language != "自動偵測")
+                                      else "Chinese")
+                        ts_items = self._align_chunk(tmp_path, raw_text, align_lang)
+                        if ts_items:
+                            subs = _ts_fn(
+                                ts_items, raw_text, g0, spk,
+                                self.cc, _output_simplified,
+                            )
+                            if subs:
+                                all_subs.extend(subs)
+                                aligned = True
+                    except Exception:
+                        aligned = False
             finally:
                 try:
                     os.remove(tmp_path)
@@ -881,30 +979,6 @@ class ChatLLMASREngine:
 
             if not raw_text:
                 continue
-
-            # ── ForcedAligner 精確時間軸對齊 ─────────────────────────────
-            aligned = False
-            if self.use_aligner and self.aligner is not None and _ts_fn is not None:
-                try:
-                    align_lang = language or "Chinese"
-                    align_results = self.aligner.align(
-                        audio=(chunk, SAMPLE_RATE),
-                        text=raw_text,
-                        language=align_lang,
-                    )
-                    ts_list = align_results[0] if align_results else []
-                    if ts_list:
-                        subs = _ts_fn(
-                            ts_list, raw_text, g0, spk,
-                            self.cc, _output_simplified,
-                            aligner_processor=self.aligner.aligner_processor,
-                            language=align_lang,
-                        )
-                        if subs:
-                            all_subs.extend(subs)
-                            aligned = True
-                except Exception:
-                    aligned = False
 
             if not aligned:
                 # ── 比例估算 Fallback ──────────────────────────────────────

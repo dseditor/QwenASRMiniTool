@@ -401,6 +401,99 @@ def _ts_to_subtitle_lines(
     return result
 
 
+def _ts_chatllm_to_subtitle_lines(
+    ts_items,
+    raw_text: str,
+    chunk_offset: float,
+    spk: str | None,
+    cc,
+    simplified: bool,
+) -> list[tuple[float, float, str, str | None]]:
+    """chatllm ForcedAligner 的字級 (word, start_sec, end_sec) + ASR 原文（含標點）
+    → 字幕行。
+
+    與 _ts_to_subtitle_lines 相同的標點切行邏輯，但 word_list 直接取自
+    chatllm FA 的 JSON 輸出（已與時間軸 1:1 對應），不需 qwen_asr 的
+    aligner_processor，因此純 chatllm（無 torch）即可運作。
+
+    參數：
+        ts_items: list[tuple[str, float, float]]  → (word, start_sec, end_sec)
+    """
+    _all_punct = _ZH_CLAUSE_END | _EN_SENT_END
+    MAX_WORDS    = 8
+    MAX_ZH_CHARS = MAX_CHARS
+    result: list[tuple[float, float, str, str | None]] = []
+
+    if not ts_items or not raw_text.strip():
+        return result
+
+    word_list = [w for (w, _s, _e) in ts_items]
+    n = len(ts_items)
+
+    seg_idx:   list[int] = []   # 當前行的 ts_items 索引
+    seg_words: list[str] = []   # 當前行的原始 word
+    ri = 0                      # raw_text 掃描位置
+
+    def _is_latin_word(w: str) -> bool:
+        return any(c.isascii() and c.isalpha() for c in w)
+
+    def _emit():
+        nonlocal seg_idx, seg_words
+        if not seg_idx:
+            seg_idx = []; seg_words = []
+            return
+        start = chunk_offset + ts_items[seg_idx[0]][1]
+        end   = chunk_offset + ts_items[seg_idx[-1]][2]
+        if any(_is_latin_word(w) for w in seg_words):
+            text = " ".join(seg_words)
+        else:
+            text = "".join(seg_words)
+        if not simplified and cc is not None:
+            text = cc.convert(text)
+        if end > start and text.strip():
+            result.append((start, end, text.strip(), spk))
+        seg_idx = []; seg_words = []
+
+    def _over_limit() -> bool:
+        if any(_is_latin_word(w) for w in seg_words):
+            return len(seg_words) > MAX_WORDS
+        return sum(len(w) for w in seg_words) > MAX_ZH_CHARS
+
+    for wi in range(n):
+        word = word_list[wi]
+
+        # 在 raw_text 中前進到 word 位置；遇到標點 → 先切行
+        hit_punct = False
+        while ri < len(raw_text):
+            c = raw_text[ri]
+            if c in _all_punct:
+                hit_punct = True; ri += 1; continue
+            if c == " ":
+                ri += 1; continue
+            break
+
+        if hit_punct:
+            _emit()
+
+        seg_idx.append(wi)
+        seg_words.append(word)
+
+        # 跳過 word 在 raw_text 中佔用的字元（依長度計數，忽略標點/空格）
+        consumed = 0
+        word_len = len(word)
+        while ri < len(raw_text) and consumed < word_len:
+            c = raw_text[ri]
+            if c in _all_punct or c == " ":
+                ri += 1; continue
+            ri += 1; consumed += 1
+
+        if _over_limit():
+            _emit()
+
+    _emit()
+    return result
+
+
 def _rebuild_text_with_spaces(raw_chars: list[str]) -> str:
     """以 raw_text 的字元序列（含空格）重建可讀字幕文字（輔助函式，保留相容）。"""
     result: list[str] = []
@@ -1299,9 +1392,107 @@ class App(ctk.CTk):
     # ── 時間軸對齊 UI ──────────────────────────────────
 
     def _on_align_toggle(self):
-        """動態切換 ForcedAligner 啟用狀態（不需重新載入模型）。"""
-        if hasattr(self.engine, 'aligner') and self.engine.aligner is not None:
-            self.engine.use_aligner = self._align_var.get()
+        """切換時間軸對齊。FA 未就緒時引導下載 chatllm ForcedAligner 模型。"""
+        # 關閉：直接停用
+        if not self._align_var.get():
+            if hasattr(self.engine, 'use_aligner'):
+                self.engine.use_aligner = False
+            return
+
+        # 開啟：已就緒 → 直接啟用
+        if getattr(self.engine, 'use_aligner', False) and \
+           getattr(self.engine, '_fa_bin', None):
+            self.engine.use_aligner = True
+            return
+
+        # FA 尚未就緒：openvino 後端（torch 版）沿用舊行為，僅切旗標
+        if not hasattr(self.engine, 'FA_BIN_NAME'):
+            if hasattr(self.engine, 'aligner') and self.engine.aligner is not None:
+                self.engine.use_aligner = True
+            else:
+                self._align_var.set(False)
+            return
+
+        # chatllm 後端：先取消勾選，背景檢查模型 → 缺少則引導下載
+        self._align_var.set(False)
+        threading.Thread(target=self._check_aligner_model, daemon=True).start()
+
+    # ── 時間軸對齊模型：檢查 + 按需下載（chatllm 後端）────────────────
+
+    def _aligner_dir(self) -> Path | None:
+        """FA .bin 應放置的資料夾（與 ASR .bin 同層）。"""
+        mp = getattr(self.engine, "_model_path", None)
+        if mp:
+            return Path(mp).parent
+        return self._model_dir
+
+    def _check_aligner_model(self):
+        """背景執行緒：FA .bin 在 → 重載 aligner；不在 → 詢問下載。"""
+        from downloader import quick_check_aligner
+        fa_dir = self._aligner_dir()
+        if fa_dir is None:
+            return
+        if quick_check_aligner(fa_dir):
+            self.after(0, self._reload_aligner)
+        else:
+            self.after(0, lambda: self._ask_download_aligner(fa_dir))
+
+    def _ask_download_aligner(self, fa_dir: Path):
+        """主執行緒：詢問是否下載 chatllm ForcedAligner 模型（約 939 MB）。"""
+        fname = getattr(self.engine, "FA_BIN_NAME", "qwen3-focedaligner-0.6b.bin")
+        answer = messagebox.askyesno(
+            "時間軸對齊模型",
+            "「時間軸對齊」需要額外下載 ForcedAligner 模型（約 939 MB）：\n"
+            f"  • {fname}\n\n"
+            "下載後即可產生精確的字級時間軸（純 chatllm，無需 PyTorch）。\n"
+            "是否立即下載？",
+        )
+        if answer:
+            threading.Thread(
+                target=lambda: self._download_aligner_model(fa_dir), daemon=True
+            ).start()
+
+    def _download_aligner_model(self, fa_dir: Path):
+        """背景執行緒：下載 FA 模型，完成後重新載入 aligner。"""
+        from downloader import download_aligner
+        self.after(0, self._show_dl_bar)
+        self._set_status("⬇ 下載時間軸對齊模型…")
+        try:
+            download_aligner(fa_dir, progress_cb=self._on_dl_progress)
+        except Exception as e:
+            msg = str(e)
+            self.after(0, self._hide_dl_bar)
+            self.after(0, lambda: messagebox.showerror(
+                "下載失敗",
+                f"時間軸對齊模型下載失敗：\n{msg}\n\n請確認網路連線後重試。",
+            ))
+            self.after(0, lambda: self._set_status("❌ FA 模型下載失敗"))
+            return
+        self.after(0, self._hide_dl_bar)
+        self.after(0, self._reload_aligner)
+
+    def _reload_aligner(self):
+        """重新載入 aligner（chatllm 引擎）並同步勾選狀態。"""
+        def _w():
+            try:
+                self.engine._load_aligner(cb=self._set_status)
+            except Exception:
+                pass
+            self.after(0, self._sync_align_checkbox)
+        threading.Thread(target=_w, daemon=True).start()
+
+    def _sync_align_checkbox(self):
+        """依 aligner 載入結果同步「時間軸對齊」勾選與狀態。"""
+        if not hasattr(self, 'align_chk'):
+            return
+        if getattr(self.engine, 'use_aligner', False):
+            self.align_chk.configure(state="normal")
+            self._align_var.set(True)
+            self.engine.use_aligner = True
+            self._set_status("✅ 時間軸對齊已啟用")
+        else:
+            self._align_var.set(False)
+            self._set_status("⚠ 時間軸對齊模型未就緒")
 
     # ── Hint 輸入輔助 ─────────────────────────────────────────────────
 
@@ -2131,11 +2322,17 @@ class App(ctk.CTk):
                 target=self._check_diarization_models, daemon=True
             ).start()
 
-        # ForcedAligner checkbox：載入成功 → 啟用；否則 → 停用並取消勾選
+        # ForcedAligner checkbox
         if hasattr(self, 'align_chk'):
-            if hasattr(self.engine, 'use_aligner') and self.engine.use_aligner:
+            if getattr(self.engine, 'use_aligner', False):
+                # FA 已就緒 → 啟用且預設勾選
                 self.align_chk.configure(state="normal")
+            elif hasattr(self.engine, 'FA_BIN_NAME'):
+                # chatllm 後端：FA 可按需下載 → 保持可點，未就緒時不勾選
+                self.align_chk.configure(state="normal")
+                self._align_var.set(False)
             else:
+                # openvino（torch 版）：FA 未載入 → 停用
                 self.align_chk.configure(state="disabled")
                 self._align_var.set(False)
 

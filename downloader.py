@@ -143,6 +143,48 @@ def _file_is_real(path: Path) -> bool:
         return False
 
 
+# ── ForcedAligner（chatllm .bin，單檔，無需 torch）────────────────────
+_FA_BIN_NAME = "qwen3-focedaligner-0.6b.bin"
+_FA_BIN_URL  = (
+    "https://huggingface.co/dseditor/Collection/resolve/main/"
+    "qwen3-focedaligner-0.6b.bin"
+)
+
+
+def quick_check_aligner(model_dir: Path) -> bool:
+    """快速檢查 chatllm ForcedAligner .bin 是否存在（非 LFS pointer）。"""
+    return _file_is_real(Path(model_dir) / _FA_BIN_NAME)
+
+
+def download_aligner(model_dir: Path, progress_cb=None):
+    """下載 chatllm ForcedAligner .bin 至 model_dir（約 939 MB）。
+
+    progress_cb(pct: float, msg: str)   pct ∈ [0, 1]
+    下載失敗時拋出例外。
+    """
+    model_dir = Path(model_dir)
+    model_dir.mkdir(parents=True, exist_ok=True)
+    dest = model_dir / _FA_BIN_NAME
+    if _file_is_real(dest):
+        if progress_cb:
+            progress_cb(1.0, "時間軸對齊模型已存在")
+        return
+
+    if progress_cb:
+        progress_cb(0.0, "下載時間軸對齊模型…")
+
+    def _cb(done: int, total: int):
+        if progress_cb and total > 0:
+            progress_cb(
+                done / total,
+                f"下載時間軸對齊模型… {done/1_048_576:.0f} / {total/1_048_576:.0f} MB",
+            )
+
+    _download_file(_FA_BIN_URL, dest, progress_cb=_cb)
+    if progress_cb:
+        progress_cb(1.0, "時間軸對齊模型下載完成！")
+
+
 def quick_check_diarization(model_dir: Path) -> bool:
     """快速檢查說話者分離模型是否存在且非 LFS pointer。"""
     diar_dir = model_dir / "diarization"

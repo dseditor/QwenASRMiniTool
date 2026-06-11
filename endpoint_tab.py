@@ -110,8 +110,8 @@ class EndpointTab(ctk.CTkScrollableFrame):
         ctk.CTkLabel(
             self,
             text="⚠ 風險提醒：開啟對外網址＝把你的轉錄服務公開到網際網路。"
-                 "任何取得該網址的人都能上傳音檔、消耗你的 CPU/GPU，且無密碼驗證。"
-                 "請僅在需要時開啟、用完立即停止，切勿外流網址。",
+                 "網址含存取金鑰（等同密碼）——任何取得「完整網址」的人都能上傳音檔、"
+                 "消耗你的 CPU/GPU。請僅在需要時開啟、用完立即停止，切勿外流網址/QR。",
             font=("Microsoft JhengHei", 11, "bold"), anchor="w", justify="left",
             text_color=("#B00", "#F0A0A0"), wraplength=600,
         ).pack(fill="x", padx=14, pady=(0, 6))
@@ -156,11 +156,16 @@ class EndpointTab(ctk.CTkScrollableFrame):
                           ).pack(side="left", padx=(6, 0))
 
     # ══ API 服務 ══════════════════════════════════════════════════════
+    def _api_token(self) -> str:
+        srv = getattr(self._app, "_api_server", None)
+        return getattr(srv, "token", "") if srv else ""
+
     def _refresh_urls(self):
         port = self._api_port_var.get()
         running = self._api_running()
-        self._local_url = f"http://127.0.0.1:{port}/" if running else None
-        self._lan_url = f"http://{_local_ip()}:{port}/" if running else None
+        q = f"/?k={self._api_token()}" if running else "/"
+        self._local_url = f"http://127.0.0.1:{port}{q}" if running else None
+        self._lan_url = f"http://{_local_ip()}:{port}{q}" if running else None
         self._local_lbl.configure(text=self._local_url or "（服務未啟用）")
         self._lan_lbl.configure(text=self._lan_url or "（服務未啟用）")
 
@@ -286,9 +291,9 @@ class EndpointTab(ctk.CTkScrollableFrame):
         if not messagebox.askyesno(
             "確認開啟對外網址？",
             "即將透過 Cloudflare 臨時通道把轉錄服務公開到網際網路。\n\n"
-            "• 任何取得網址的人都能上傳音檔、使用你的轉錄服務\n"
-            "• 服務無密碼驗證，會消耗你的 CPU/GPU\n"
-            "• 網址請勿外流；用完請按「停止對外」關閉\n\n"
+            "• 網址含存取金鑰（等同密碼）；任何取得「完整網址」的人都能使用\n"
+            "• 會消耗你的 CPU/GPU\n"
+            "• 網址/QR 請勿外流；用完請按「停止對外」關閉\n\n"
             "確定要開啟嗎？",
             icon="warning", default="no",
         ):
@@ -338,8 +343,9 @@ class EndpointTab(ctk.CTkScrollableFrame):
         for line in self._cf_proc.stdout:                      # type: ignore
             m = _TRYCF_RE.search(line)
             if m:
-                self._cf_url = m.group(0)
-                self._set_cf(f"✅ 對外網址：{self._cf_url}", ok=True)
+                tok = self._api_token()
+                self._cf_url = m.group(0) + (f"/?k={tok}" if tok else "/")
+                self._set_cf(f"✅ 對外網址（含金鑰，等同密碼）：{self._cf_url}", ok=True)
                 self.after(0, lambda: (self._cf_open_btn.configure(state="normal"),
                                        self._cf_qr_btn.configure(state="normal")))
                 break

@@ -14,12 +14,14 @@
 from __future__ import annotations
 
 import json
+import secrets
 import socket
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlparse, parse_qs
 
 # 影片副檔名（需 ffmpeg 抽音軌）——與 ffmpeg_utils 一致即可，這裡延遲 import
 _VIDEO_HINT = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm",
@@ -106,6 +108,9 @@ class TranscribeServer:
     get_engine     : callable() -> engine | None（取得目前載入的引擎）
     port           : 監聽埠（預設 11435）
     host           : 預設 0.0.0.0（區網可連）
+    token          : 存取金鑰；None 時自動產生。所有請求（網頁與端點）都需
+                     攜帶（Authorization: Bearer <token> 或 ?k=<token>）。
+                     金鑰隨「端點分頁」顯示的網址/QR 流動，等同密碼。
     on_log         : callable(str)，記錄訊息（可選）
     """
 
@@ -114,11 +119,13 @@ class TranscribeServer:
         get_engine: Callable[[], object],
         port: int = 11435,
         host: str = "0.0.0.0",
+        token: str | None = None,
         on_log: Callable[[str], None] | None = None,
     ):
         self._get_engine = get_engine
         self._port = port
         self._host = host
+        self.token = token or secrets.token_urlsafe(12)
         self._on_log = on_log
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -127,6 +134,18 @@ class TranscribeServer:
     @property
     def running(self) -> bool:
         return self._httpd is not None
+
+    def _authorized(self, handler) -> bool:
+        """檢查請求是否攜帶正確金鑰（Bearer 標頭或 ?k= 查詢參數）。"""
+        if not self.token:
+            return True
+        auth = handler.headers.get("Authorization", "")
+        if auth.startswith("Bearer ") and secrets.compare_digest(
+                auth[7:].strip(), self.token):
+            return True
+        q = parse_qs(urlparse(handler.path).query)
+        got = q.get("k", [""])[0]
+        return bool(got) and secrets.compare_digest(got, self.token)
 
     def start(self):
         if self._httpd is not None:
@@ -142,32 +161,33 @@ class TranscribeServer:
                 self.send_response(code)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(body)))
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(body)
 
             def do_GET(self):
-                if self.path.startswith("/health"):
+                path = urlparse(self.path).path
+                if path == "/health":
+                    # 健康檢查不含敏感資訊，免金鑰（供探活）
                     eng = server._get_engine()
                     ready = bool(eng and getattr(eng, "ready", False))
                     self._send(200, "application/json",
                                json.dumps({"status": "ok", "model_ready": ready}).encode())
-                elif self.path in ("", "/") or self.path.startswith("/?"):
+                elif path in ("", "/"):
+                    if not server._authorized(self):
+                        self._send(401, "text/html; charset=utf-8",
+                                   _UNAUTH_HTML.encode("utf-8"))
+                        return
                     self._send(200, "text/html; charset=utf-8", _INDEX_HTML.encode("utf-8"))
                 else:
                     self._send(404, "application/json", b'{"error":"not found"}')
 
-            def do_OPTIONS(self):
-                self.send_response(200)
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-                self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-                self.send_header("Content-Length", "0")
-                self.end_headers()
-
             def do_POST(self):
-                if not self.path.endswith("/audio/transcriptions"):
+                if not urlparse(self.path).path.endswith("/audio/transcriptions"):
                     self._send(404, "application/json", b'{"error":"not found"}')
+                    return
+                if not server._authorized(self):
+                    self._send(401, "application/json",
+                               b'{"error":{"message":"unauthorized: missing or invalid key"}}')
                     return
                 try:
                     server._handle_transcribe(self)
@@ -298,7 +318,6 @@ class TranscribeServer:
         req.send_response(200)
         req.send_header("Content-Type", ctype)
         req.send_header("Content-Length", str(len(body)))
-        req.send_header("Access-Control-Allow-Origin", "*")
         req.end_headers()
         req.wfile.write(body)
 
@@ -307,9 +326,20 @@ class TranscribeServer:
         req.send_response(code)
         req.send_header("Content-Type", "application/json")
         req.send_header("Content-Length", str(len(body)))
-        req.send_header("Access-Control-Allow-Origin", "*")
         req.end_headers()
         req.wfile.write(body)
+
+
+# ── 未授權頁（缺金鑰）──────────────────────────────────────────────────
+_UNAUTH_HTML = """<!DOCTYPE html>
+<html lang="zh-Hant"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>401 未授權</title></head>
+<body style="background:#1b1d23;color:#e6e8ee;font-family:'Microsoft JhengHei',sans-serif;text-align:center;padding-top:18vh">
+<h2>&#128274; 需要存取金鑰</h2>
+<p style="color:#8b94a6">請使用 QwenASR「端點」分頁顯示的<b>完整網址</b>（含金鑰）開啟，<br>
+或掃描分頁提供的 QR code。直接連線網域是無效的。</p>
+</body></html>"""
 
 
 # ── 內嵌上傳網頁（self-contained，無 CDN，可離線）─────────────────────
@@ -388,6 +418,7 @@ _INDEX_HTML = """<!DOCTYPE html>
 </div>
 <script>
 const $ = s => document.querySelector(s);
+const KEY = new URLSearchParams(location.search).get('k') || '';
 let picked = null;
 const drop = $("#drop"), fileEl = $("#file");
 drop.onclick = () => fileEl.click();
@@ -408,7 +439,9 @@ $("#go").onclick = async () => {
   $("#go").disabled=true; $("#status").textContent="轉錄中…（長音檔需要一些時間）";
   const t0=Date.now();
   try{
-    const r = await fetch("/v1/audio/transcriptions", {method:"POST", body:fd});
+    const r = await fetch("/v1/audio/transcriptions?k="+encodeURIComponent(KEY),
+                          {method:"POST", body:fd,
+                           headers: KEY ? {"Authorization":"Bearer "+KEY} : {}});
     const ctype = r.headers.get("Content-Type")||"";
     let text;
     if(ctype.includes("application/json")){

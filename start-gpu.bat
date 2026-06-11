@@ -5,14 +5,24 @@ setlocal enabledelayedexpansion
 REM ============================================================
 REM   Qwen3 ASR GPU Launcher  (PyTorch version)
 REM   Uses PyTorch CUDA backend (no OpenVINO required)
-REM   Model: GPUModel\Qwen3-ASR-1.7B
+REM   Model: cudagpu\GPUModel\Qwen3-ASR-1.7B
+REM
+REM   LAYOUT: this launcher stays at the package root; all GPU
+REM   scripts, models and the venv live under cudagpu\ . Only
+REM   start-gpu.bat is exposed at the root, keeping it tidy.
 REM
 REM   Step 3 offers two interfaces:
 REM     [1] CustomTkinter desktop app  (app-gpu.py)
 REM     [2] Streamlit web UI           (streamlit_vulkan.py)
 REM ============================================================
 
-set "SCRIPT_DIR=%~dp0"
+REM All GPU resources live under cudagpu\ (scripts, models, venv).
+set "SCRIPT_DIR=%~dp0cudagpu\"
+if not exist "%SCRIPT_DIR%" (
+    echo  [ERROR] cudagpu folder not found next to start-gpu.bat.
+    echo          Expected: %SCRIPT_DIR%
+    pause & exit /b 1
+)
 set "GPU_MODEL_DIR=%SCRIPT_DIR%GPUModel"
 set "ASR_MODEL_DIR=%GPU_MODEL_DIR%\Qwen3-ASR-1.7B"
 set "ALIGNER_DIR=%GPU_MODEL_DIR%\Qwen3-ForcedAligner-0.6B"

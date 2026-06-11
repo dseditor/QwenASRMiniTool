@@ -10,8 +10,10 @@
 """
 from __future__ import annotations
 
-# 本次編譯版本（dist2）。最新已發佈 Release 為 1.0.5，故此版為 1.0.6。
-__version__ = "1.0.6"
+# 本次編譯版本（dist2）。1.0.7：FA 統一(OpenVINO/chatllm 共用)、孤兒字修正、
+# 錄製轉換改名、說話者分離預設開啟、ffmpeg 自動偵測、OpenAI 相容端點+端點分頁
+# (QR/cloudflared 對外網址)。最新已發佈 Release 為 1.0.5。
+__version__ = "1.0.7"
 
 # 自動更新來源：GitHub repo（owner/name）
 GITHUB_REPO = "dseditor/QwenASRMiniTool"

@@ -652,22 +652,36 @@ class SettingsTab(ctk.CTkScrollableFrame):
         self._vad_slider.set(vad)
         self._vad_val_var.set(f"{vad:.2f}")
 
-        # FFmpeg 狀態
+        # FFmpeg 狀態：自動偵測（含編譯版 bundled <app>/ffmpeg/ffmpeg.exe）
+        # 偵測順序：使用者手動指定 → App 已偵測 → find_ffmpeg()（系統 PATH／/ffmpeg）
+        detected = ""
         ffpath = settings.get("ffmpeg_path", "")
         if ffpath and Path(ffpath).exists():
-            self._ffmpeg_status_lbl.configure(
-                text=f"✅ {ffpath}", text_color=("green", "#88CC88"),
-            )
+            detected = ffpath
         else:
             ffexe = getattr(self._app, "_ffmpeg_exe", None)
             if ffexe and Path(ffexe).exists():
-                self._ffmpeg_status_lbl.configure(
-                    text=f"✅ {ffexe}", text_color=("green", "#88CC88"),
-                )
+                detected = str(ffexe)
             else:
-                self._ffmpeg_status_lbl.configure(
-                    text="❌ 未配置", text_color=("red", "#CC6666"),
-                )
+                try:
+                    from ffmpeg_utils import find_ffmpeg
+                    found = find_ffmpeg()
+                    if found:
+                        detected = str(found)
+                        # 回寫至 App，供影片轉換與後續顯示直接取用
+                        if hasattr(self._app, "_ffmpeg_exe"):
+                            self._app._ffmpeg_exe = found  # type: ignore
+                except Exception:
+                    detected = ""
+
+        if detected:
+            self._ffmpeg_status_lbl.configure(
+                text=f"✅ {detected}", text_color=("green", "#88CC88"),
+            )
+        else:
+            self._ffmpeg_status_lbl.configure(
+                text="❌ 未配置", text_color=("red", "#CC6666"),
+            )
 
         # 模型路徑（settings 已同步到 self._app._settings，可直接讀）
         self._model_path_lbl.configure(text=self._get_model_path_text())

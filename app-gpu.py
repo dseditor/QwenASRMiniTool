@@ -11,7 +11,7 @@ Qwen3 ASR 字幕生成器 - GPU 版本（PyTorch 版本）
 
 功能：
   - 音檔轉字幕（支援影片 mp4/mkv 等，需要 ffmpeg）
-  - 即時轉換（VAD 語音偵測）
+  - 錄製轉換（VAD 語音偵測，於說話停頓時轉換）
   - 字幕驗證編輯器（來自 subtitle_editor.py）
   - 批次多檔辨識（來自 batch_tab.py）
 """
@@ -793,6 +793,7 @@ class App(ctk.CTk):
         self._file_diarize: bool             = False
         self._file_n_speakers: int | None    = None
         self._ffmpeg_exe: Path | None        = None  # ffmpeg 路徑（影片處理用）
+        self._api_server                     = None   # TranscribeServer（OpenAI 相容端點）
 
         self._build_ui()
         self._detect_devices()
@@ -852,13 +853,18 @@ class App(ctk.CTk):
         self.tabs = ctk.CTkTabview(self, anchor="nw")
         self.tabs.pack(fill="both", expand=True, padx=10, pady=(8, 10))
         self.tabs.add("  音檔轉字幕  ")
-        self.tabs.add("  即時轉換  ")
+        self.tabs.add("  錄製轉換  ")
         self.tabs.add("  批次辨識  ")
+        self.tabs.add("  端點  ")
         self.tabs.add("  設定  ")
 
         self._build_file_tab(self.tabs.tab("  音檔轉字幕  "))
-        self._build_rt_tab(self.tabs.tab("  即時轉換  "))
+        self._build_rt_tab(self.tabs.tab("  錄製轉換  "))
         self._build_batch_tab(self.tabs.tab("  批次辨識  "))
+
+        from endpoint_tab import EndpointTab
+        self._endpoint_tab = EndpointTab(self.tabs.tab("  端點  "), self)
+        self._endpoint_tab.pack(fill="both", expand=True)
 
         from setting import SettingsTab
         self._settings_tab = SettingsTab(
@@ -907,7 +913,8 @@ class App(ctk.CTk):
         )
         self.subtitle_btn.pack(side="left", padx=(8, 0))
 
-        self._diarize_var = ctk.BooleanVar(value=False)
+        # 說話者分離：預設開啟（GPU 版依賴本機 ov_models/diarization 模型）
+        self._diarize_var = ctk.BooleanVar(value=True)
         self.diarize_chk = ctk.CTkCheckBox(
             row2, text="說話者分離", variable=self._diarize_var,
             font=FONT_BODY, state="disabled",
@@ -977,11 +984,18 @@ class App(ctk.CTk):
         self.file_log = ctk.CTkTextbox(parent, font=FONT_MONO, state="disabled")
         self.file_log.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
-    # ── 即時轉換 tab ───────────────────────────────────
+    # ── 錄製轉換 tab ───────────────────────────────────
 
     def _build_rt_tab(self, parent):
+        ctk.CTkLabel(
+            parent,
+            text="錄製轉換：邊錄音邊辨識，於說話停頓時將該段語音轉成文字（非逐字即時）",
+            font=("Microsoft JhengHei", 12),
+            text_color="#8899AA", anchor="w", justify="left",
+        ).pack(fill="x", padx=8, pady=(12, 0))
+
         dev_row = ctk.CTkFrame(parent, fg_color="transparent")
-        dev_row.pack(fill="x", padx=8, pady=(12, 4))
+        dev_row.pack(fill="x", padx=8, pady=(6, 4))
 
         ctk.CTkLabel(dev_row, text="音訊輸入裝置：", font=FONT_BODY).pack(
             side="left", padx=(0, 8)
@@ -1045,7 +1059,7 @@ class App(ctk.CTk):
         ).pack(side="left", padx=(12, 0))
 
         ctk.CTkLabel(
-            parent, text="即時字幕", font=FONT_BODY,
+            parent, text="錄製字幕", font=FONT_BODY,
             text_color="#AAAAAA", anchor="w",
         ).pack(fill="x", padx=8, pady=(8, 2))
 
@@ -1193,8 +1207,18 @@ class App(ctk.CTk):
         self.lang_combo.configure(state="readonly")
         device_label = self.device_var.get()
         self._set_status(f"✅ 就緒（{device_label}）")
-        if self.engine.diar_engine and self.engine.diar_engine.ready:
-            self.diarize_chk.configure(state="normal")
+        # API 服務：若使用者先前啟用 → 模型就緒後自動開服
+        if hasattr(self, "_endpoint_tab"):
+            self._endpoint_tab.start_api_if_enabled()
+        # 說話者分離：啟用控件並依預設值同步人數選擇器
+        self.diarize_chk.configure(state="normal")
+        self.n_spk_combo.configure(
+            state="readonly" if self._diarize_var.get() else "disabled"
+        )
+        if not (self.engine.diar_engine and self.engine.diar_engine.ready):
+            # GPU 版無按需下載流程：模型缺漏時取消勾選並提示需附帶模型
+            self._diarize_var.set(False)
+            self.n_spk_combo.configure(state="disabled")
         # ForcedAligner checkbox：載入成功 → 啟用；否則 → 停用並取消勾選
         if hasattr(self, "align_chk"):
             if self.engine.use_aligner:
@@ -1585,6 +1609,9 @@ class App(ctk.CTk):
                 return
         if self._rt_mgr:
             try: self._rt_mgr.stop()
+            except Exception: pass
+        if hasattr(self, "_endpoint_tab"):
+            try: self._endpoint_tab.stop_all()
             except Exception: pass
         self.destroy()
         os._exit(0)

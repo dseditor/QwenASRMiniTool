@@ -3,7 +3,7 @@ Qwen3 ASR 字幕生成器 - CustomTkinter 前端
 
 功能：
   1. 音檔上傳 → SRT 字幕（支援 OpenVINO CPU / GPU）
-  2. 即時轉換：偵測音訊輸入裝置，邊說邊顯示字幕
+  2. 錄製轉換：偵測音訊輸入裝置，錄音後於說話停頓時轉換成字幕
 """
 from __future__ import annotations
 
@@ -257,6 +257,59 @@ def _find_vad_model() -> Path | None:
     return None
 
 
+def _merge_orphan_lines(
+    lines: list[tuple[float, float, str, str | None]],
+    min_chars: int = 1,
+    max_gap: float = 0.8,
+) -> list[tuple[float, float, str, str | None]]:
+    """合併過短的孤立字幕行（如句尾「吧」單獨成行）到相鄰行。
+
+    FA 斷句時 MAX_WORDS 與標點切行偶爾會疊加，在子句中間切一刀，把
+    句尾語助詞（吧/啊/呢/了…）留成獨立一行。此處在輸出前把這類「孤兒行」
+    併回相鄰行：優先併入前一行（時間連續、同說話者），首行孤兒則併入下一行。
+    含拉丁詞時以空格 join，純中文直接相接。
+
+    預設僅併「單字」孤兒：單字幾乎都是句尾語助詞，向後併入前一行最安全；
+    兩字以上可能是句首短詞，向後併易誤接，故不處理。
+    """
+    if not lines:
+        return lines
+
+    def _has_latin(t: str) -> bool:
+        return any(c.isascii() and c.isalpha() for c in t)
+
+    def _vlen(t: str) -> int:
+        return len(t.replace(" ", ""))
+
+    def _is_orphan(t: str) -> bool:
+        # 純中文且可見字數極少才視為孤兒；含拉丁詞（英文/數字詞）不併
+        return (not _has_latin(t)) and 0 < _vlen(t) <= min_chars
+
+    def _join(a: str, b: str) -> str:
+        sep = " " if (_has_latin(a) or _has_latin(b)) else ""
+        return f"{a}{sep}{b}"
+
+    merged: list[tuple[float, float, str, str | None]] = []
+    for (s, e, t, spk) in lines:
+        if (_is_orphan(t) and merged
+                and merged[-1][3] == spk
+                and s - merged[-1][1] <= max_gap):
+            ps, _pe, pt, pspk = merged[-1]
+            merged[-1] = (ps, e, _join(pt, t), pspk)
+        else:
+            merged.append((s, e, t, spk))
+
+    # 首行仍是孤兒（無前一行可併）→ 併入下一行
+    if len(merged) >= 2 and _is_orphan(merged[0][2]):
+        s0, _e0, t0, spk0 = merged[0]
+        s1, e1, t1, spk1 = merged[1]
+        if spk0 == spk1 and s1 - merged[0][1] <= max_gap:
+            merged[1] = (s0, e1, _join(t0, t1), spk1)
+            merged.pop(0)
+
+    return merged
+
+
 def _ts_to_subtitle_lines(
     ts_list,
     raw_text: str,
@@ -398,7 +451,7 @@ def _ts_to_subtitle_lines(
 
     # ── 3. 清空剩餘 ──────────────────────────────────────────────────
     _emit()
-    return result
+    return _merge_orphan_lines(result)
 
 
 def _ts_chatllm_to_subtitle_lines(
@@ -491,7 +544,7 @@ def _ts_chatllm_to_subtitle_lines(
             _emit()
 
     _emit()
-    return result
+    return _merge_orphan_lines(result)
 
 
 def _rebuild_text_with_spaces(raw_chars: list[str]) -> str:
@@ -517,6 +570,9 @@ class ASREngine:
     """封裝所有模型。transcribe() 加互斥鎖，多執行緒安全。"""
 
     max_chunk_secs: int = 30   # 每段最長音訊（秒），子類別可覆寫
+    # 時間軸對齊改用 chatllm 原生 FA（無需 torch）；與 ChatLLMASREngine 共用
+    # 同一檔名與下載流程，讓「時間軸對齊」UI 在 CPU/GPU 後端行為一致。
+    FA_BIN_NAME = "qwen3-focedaligner-0.6b.bin"
 
     def __init__(self):
         self.ready       = False
@@ -529,8 +585,11 @@ class ASREngine:
         self.pad_id      = None
         self.cc          = None
         self.diar_engine = None   # DiarizationEngine（可選）
-        self.aligner     = None   # Qwen3ForcedAligner（可選，CPU）
+        self.aligner     = None   # 相容旗標（chatllm FA 就緒時為 True）
         self.use_aligner = False  # 是否啟用時間軸對齊
+        self._fa         = None   # ChatLLMAligner（chatllm 原生 FA）
+        self._fa_bin     = None   # FA .bin 路徑（就緒時非 None）
+        self._model_dir  = None   # 模型資料夾（FA .bin 與下載位置）
 
     def load(self, device: str = "CPU", model_dir: Path = None, cb=None, cpu_threads: int = 0):
         """從背景執行緒呼叫。cb(msg) 用於更新 UI 狀態。
@@ -543,6 +602,7 @@ class ASREngine:
 
         if model_dir is None:
             model_dir = _DEFAULT_MODEL_DIR
+        self._model_dir = model_dir   # FA .bin 與按需下載位置
         ov_dir   = model_dir / "qwen3_asr_int8"
 
         # ── CPU 執行緒設定 ─────────────────────────────────────────────
@@ -585,26 +645,10 @@ class ASREngine:
         self.pad_id    = self.processor.pad_id
         self.cc        = opencc.OpenCC("s2twp")
 
-        # ── ForcedAligner（可選，CPU PyTorch，不需 CUDA）──────────────
-        self.aligner     = None
-        self.use_aligner = False
-        aligner_path = GPU_MODEL_DIR / ALIGNER_MODEL_NAME
-        if aligner_path.exists():
-            try:
-                _s(f"載入時間軸對齊模型（{ALIGNER_MODEL_NAME}，CPU）…")
-                import torch
-                from qwen_asr import Qwen3ForcedAligner
-                self.aligner = Qwen3ForcedAligner.from_pretrained(
-                    str(aligner_path),
-                    device_map="cpu",
-                    dtype=torch.float32,
-                )
-                self.use_aligner = True
-                _s(f"時間軸對齊模型就緒（CPU）")
-            except Exception as _e:
-                _s(f"⚠ ForcedAligner 載入失敗（{_e}），改用比例估算")
-                self.aligner     = None
-                self.use_aligner = False
+        # ── ForcedAligner（chatllm 原生，CPU -ngl 0，無需 torch）──────────
+        #    與 ChatLLMASREngine 共用 chatllm main.exe 子程序對齊邏輯。
+        #    缺 .bin 時靜默退回比例估算；UI 會引導使用者按需下載。
+        self._load_aligner(cb=_s)
 
         # 抑制 "Setting pad_token_id to eos_token_id" 重複警告
         try:
@@ -617,6 +661,37 @@ class ASREngine:
         self.ready     = True
         aligner_info = "  + ForcedAligner" if self.use_aligner else ""
         _s(f"編譯完成（{device}{aligner_info}）")
+
+    # ── 時間軸對齊（chatllm 原生 FA，CPU -ngl 0）──────────────────────────
+    def _load_aligner(self, cb=None):
+        """偵測 chatllm 版 ForcedAligner .bin（與 ASR .bin 同層 model_dir）。
+
+        OpenVINO 後端沿用 chatllm main.exe 子程序做字級對齊（CPU -ngl 0），
+        完全不需 PyTorch。缺 .bin 或驗證失敗時靜默退回比例估算，UI 會引導
+        使用者按需下載。
+        """
+        from fa_aligner import ChatLLMAligner
+        self.aligner     = None
+        self.use_aligner = False
+        self._fa_bin     = None
+        # FA 一律以 CPU 子程序執行（n_gpu_layers=0），與 OpenVINO 裝置選擇無關，
+        # 避免 Vulkan/Intel 裝置 id 不一致；CPU 對齊已足夠快。
+        self._fa = ChatLLMAligner(fa_dir=self._model_dir, n_gpu_layers=0)
+        if self._fa.load(cb=cb):
+            self._fa_bin     = self._fa._fa_bin
+            self.aligner     = True   # 相容旗標（沿用 use_aligner 判斷流程）
+            self.use_aligner = True
+
+    def _align_chunk(
+        self,
+        wav_path: str,
+        ref_text: str,
+        language: str = "Chinese",
+    ) -> list[tuple[str, float, float]]:
+        """委派 chatllm FA 對齊「參考文字 + 音訊」，回傳字級時間軸。"""
+        if self._fa is None or not self._fa_bin:
+            return []
+        return self._fa.align_chunk(wav_path, ref_text, language)
 
     def transcribe(
         self,
@@ -795,29 +870,34 @@ class ASREngine:
             if not raw_text:
                 continue
 
-            # ── ForcedAligner 精確時間軸對齊 ─────────────────────────────
+            # ── ForcedAligner 精確時間軸對齊（chatllm .bin，CPU -ngl 0）──
+            #    把 chunk 寫成暫存 wav，交給 chatllm main.exe 做字級對齊，
+            #    再用 _ts_chatllm_to_subtitle_lines 依字級時間軸＋標點切行。
             aligned = False
-            if self.use_aligner and self.aligner is not None:
+            if self.use_aligner and self._fa_bin is not None:
+                import tempfile as _tempfile
+                import soundfile as _sf
+                with _tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as _tf:
+                    _tmp_wav = _tf.name
                 try:
-                    align_lang = language or "Chinese"
-                    align_results = self.aligner.align(
-                        audio=(chunk, SAMPLE_RATE),
-                        text=raw_text,
-                        language=align_lang,
-                    )
-                    ts_list = align_results[0] if align_results else []
-                    if ts_list:
-                        subs = _ts_to_subtitle_lines(
-                            ts_list, raw_text, g0, spk,
+                    _sf.write(_tmp_wav, chunk, SAMPLE_RATE, subtype="PCM_16")
+                    align_lang = language if (language and language != "自動偵測") else "Chinese"
+                    ts_items = self._align_chunk(_tmp_wav, raw_text, align_lang)
+                    if ts_items:
+                        subs = _ts_chatllm_to_subtitle_lines(
+                            ts_items, raw_text, g0, spk,
                             self.cc, _g_output_simplified,
-                            aligner_processor=self.aligner.aligner_processor,
-                            language=align_lang,
                         )
                         if subs:
                             all_subs.extend(subs)
                             aligned = True
                 except Exception:
                     aligned = False  # 靜默 fallback 到比例估算
+                finally:
+                    try:
+                        os.remove(_tmp_wav)
+                    except OSError:
+                        pass
 
             if not aligned:
                 # ── 比例估算 Fallback ──────────────────────────────────────
@@ -1049,6 +1129,15 @@ class App(ctk.CTk):
         self._file_hint: str | None          = None   # 音檔轉字幕 hint
         self._file_diarize: bool             = False  # 說話者分離開關
         self._file_n_speakers: int | None    = None   # 指定說話者人數（None=自動）
+        self._diar_downloading: bool         = False  # 說話者分離模型下載中旗標
+        self._api_server                     = None   # TranscribeServer（OpenAI 相容端點）
+
+        # ffmpeg：啟動時自動偵測（含編譯版 bundled <app>/ffmpeg/ffmpeg.exe）
+        try:
+            from ffmpeg_utils import find_ffmpeg
+            self._ffmpeg_exe: Path | None = find_ffmpeg()
+        except Exception:
+            self._ffmpeg_exe = None
 
         self._build_ui()
         self._detect_all_devices()
@@ -1128,12 +1217,17 @@ class App(ctk.CTk):
         self.tabs.pack(fill="both", expand=True, padx=10, pady=(8, 10))
         self.tabs.add("  音檔轉字幕  ")
         self.tabs.add("  批次辨識  ")
-        self.tabs.add("  即時轉換  ")
+        self.tabs.add("  錄製轉換  ")
+        self.tabs.add("  端點  ")
         self.tabs.add("  設定  ")
 
         self._build_file_tab(self.tabs.tab("  音檔轉字幕  "))
         self._build_batch_tab(self.tabs.tab("  批次辨識  "))
-        self._build_rt_tab(self.tabs.tab("  即時轉換  "))
+        self._build_rt_tab(self.tabs.tab("  錄製轉換  "))
+
+        from endpoint_tab import EndpointTab
+        self._endpoint_tab = EndpointTab(self.tabs.tab("  端點  "), self)
+        self._endpoint_tab.pack(fill="both", expand=True)
 
         from setting import SettingsTab
         self._settings_tab = SettingsTab(
@@ -1202,7 +1296,8 @@ class App(ctk.CTk):
         )
         self.verify_btn.pack(side="left", padx=(8, 0))
 
-        self._diarize_var = ctk.BooleanVar(value=False)
+        # 說話者分離：預設開啟（模型未就緒時於載入後自動下載）
+        self._diarize_var = ctk.BooleanVar(value=True)
         self.diarize_chk = ctk.CTkCheckBox(
             row2, text="說話者分離", variable=self._diarize_var,
             font=FONT_BODY, state="disabled",
@@ -1282,12 +1377,21 @@ class App(ctk.CTk):
         )
         self.file_log.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
-    # ── 即時轉換 tab ───────────────────────────────────
+    # ── 錄製轉換 tab ───────────────────────────────────
 
     def _build_rt_tab(self, parent):
+        # 功能說明：此功能為「錄製轉換」而非真正的即時轉換，
+        # 辨識會在偵測到說話停頓時才進行。
+        ctk.CTkLabel(
+            parent,
+            text="錄製轉換：邊錄音邊辨識，於說話停頓時將該段語音轉成文字（非逐字即時）",
+            font=("Microsoft JhengHei", 12),
+            text_color="#8899AA", anchor="w", justify="left",
+        ).pack(fill="x", padx=8, pady=(12, 0))
+
         # 裝置選擇列
         dev_row = ctk.CTkFrame(parent, fg_color="transparent")
-        dev_row.pack(fill="x", padx=8, pady=(12, 4))
+        dev_row.pack(fill="x", padx=8, pady=(6, 4))
 
         ctk.CTkLabel(dev_row, text="音訊輸入裝置：", font=FONT_BODY).pack(
             side="left", padx=(0, 8)
@@ -1358,7 +1462,7 @@ class App(ctk.CTk):
 
         # 字幕顯示
         ctk.CTkLabel(
-            parent, text="即時字幕", font=FONT_BODY,
+            parent, text="錄製字幕", font=FONT_BODY,
             text_color="#AAAAAA", anchor="w",
         ).pack(fill="x", padx=8, pady=(8, 2))
 
@@ -1385,14 +1489,26 @@ class App(ctk.CTk):
     # ── 說話者分離 UI 輔助 ───────────────────────────────────────────
 
     def _on_diarize_toggle(self):
-        """說話者分離 checkbox 切換時，同步啟用／停用人數選擇器。"""
-        state = "readonly" if self._diarize_var.get() else "disabled"
-        self.n_spk_combo.configure(state=state)
+        """說話者分離 checkbox 切換時，同步啟用／停用人數選擇器。
+        若開啟但模型尚未就緒，於背景自動下載。"""
+        on = self._diarize_var.get()
+        self.n_spk_combo.configure(state="readonly" if on else "disabled")
+        if on:
+            eng = getattr(self, "engine", None)
+            ready = bool(eng and getattr(eng, "diar_engine", None)
+                         and eng.diar_engine.ready)
+            if not ready and self._model_dir is not None:
+                threading.Thread(
+                    target=self._check_diarization_models, daemon=True
+                ).start()
 
     # ── 時間軸對齊 UI ──────────────────────────────────
 
     def _on_align_toggle(self):
-        """切換時間軸對齊。FA 未就緒時引導下載 chatllm ForcedAligner 模型。"""
+        """切換時間軸對齊。FA 未就緒時引導下載 chatllm ForcedAligner 模型。
+
+        CPU(OpenVINO) 與 GPU(chatllm) 後端皆用 chatllm 原生 FA，流程一致。
+        """
         # 關閉：直接停用
         if not self._align_var.get():
             if hasattr(self.engine, 'use_aligner'):
@@ -1405,15 +1521,7 @@ class App(ctk.CTk):
             self.engine.use_aligner = True
             return
 
-        # FA 尚未就緒：openvino 後端（torch 版）沿用舊行為，僅切旗標
-        if not hasattr(self.engine, 'FA_BIN_NAME'):
-            if hasattr(self.engine, 'aligner') and self.engine.aligner is not None:
-                self.engine.use_aligner = True
-            else:
-                self._align_var.set(False)
-            return
-
-        # chatllm 後端：先取消勾選，背景檢查模型 → 缺少則引導下載
+        # FA 尚未就緒：先取消勾選，背景檢查 .bin → 缺少則引導下載（約 939 MB）
         self._align_var.set(False)
         threading.Thread(target=self._check_aligner_model, daemon=True).start()
 
@@ -2274,6 +2382,10 @@ class App(ctk.CTk):
         if hasattr(self, "_batch_tab"):
             self._batch_tab.set_engine(self.engine)
 
+        # API 服務：若使用者先前啟用 → 模型就緒後自動開服（端點分頁）
+        if hasattr(self, "_endpoint_tab"):
+            self._endpoint_tab.start_api_if_enabled()
+
         settings = self._settings or {}
         backend  = settings.get("backend", "openvino")
         device   = self.device_var.get()
@@ -2313,50 +2425,43 @@ class App(ctk.CTk):
                 values=["自動偵測"] + common_langs, state="readonly"
             )
             self.lang_var.set("自動偵測")
-        # 說話者分離 checkbox
-        if self.engine.diar_engine and self.engine.diar_engine.ready:
-            self.diarize_chk.configure(state="normal")
-        else:
-            # 模型未就緒：背景確認是否需要下載
-            threading.Thread(
-                target=self._check_diarization_models, daemon=True
-            ).start()
+        # 說話者分離 checkbox：啟用控件並依預設值同步人數選擇器
+        self.diarize_chk.configure(state="normal")
+        self.n_spk_combo.configure(
+            state="readonly" if self._diarize_var.get() else "disabled"
+        )
+        if not (self.engine.diar_engine and self.engine.diar_engine.ready):
+            # 模型未就緒：若說話者分離預設／使用者已開啟 → 自動下載
+            if self._diarize_var.get():
+                threading.Thread(
+                    target=self._check_diarization_models, daemon=True
+                ).start()
 
-        # ForcedAligner checkbox
+        # ForcedAligner checkbox：永不灰掉（CPU/GPU 後端皆用 chatllm 原生 FA）
+        #   已就緒 → 勾選；未就緒 → 不勾選但仍可點（點擊時引導下載 .bin）。
         if hasattr(self, 'align_chk'):
-            if getattr(self.engine, 'use_aligner', False):
-                # FA 已就緒 → 啟用且預設勾選
-                self.align_chk.configure(state="normal")
-            elif hasattr(self.engine, 'FA_BIN_NAME'):
-                # chatllm 後端：FA 可按需下載 → 保持可點，未就緒時不勾選
-                self.align_chk.configure(state="normal")
-                self._align_var.set(False)
-            else:
-                # openvino（torch 版）：FA 未載入 → 停用
-                self.align_chk.configure(state="disabled")
-                self._align_var.set(False)
+            self.align_chk.configure(state="normal")
+            self._align_var.set(bool(getattr(self.engine, 'use_aligner', False)))
 
     # ── 說話者分離模型：啟動時檢查 + 按需下載 ─────────────────────────
 
     def _check_diarization_models(self):
-        """背景執行緒：若說話者分離模型不存在，則在主執行緒詢問使用者。"""
-        from downloader import quick_check_diarization
-        if self._model_dir and not quick_check_diarization(self._model_dir):
-            self.after(0, self._ask_download_diarization)
+        """背景執行緒：說話者分離模型不存在時自動下載（不再詢問）。
 
-    def _ask_download_diarization(self):
-        """主執行緒：詢問使用者是否下載說話者分離模型（約 32 MB）。"""
-        answer = messagebox.askyesno(
-            "說話者分離模型",
-            "說話者分離功能需要額外下載模型（約 32 MB）：\n"
-            "  • segmentation-community-1.onnx\n"
-            "  • embedding_model.onnx\n\n"
-            "是否立即下載？（選「否」可稍後透過重新載入模型觸發）",
-        )
-        if answer:
-            threading.Thread(
-                target=self._download_diarization_models, daemon=True
-            ).start()
+        說話者分離預設開啟，缺模型時直接於背景下載並重新載入。
+        以 _diar_downloading 旗標避免（models_ready 與 toggle）重複觸發。
+        """
+        from downloader import quick_check_diarization
+        if not self._model_dir:
+            return
+        if quick_check_diarization(self._model_dir):
+            return  # 模型已存在
+        if getattr(self, "_diar_downloading", False):
+            return  # 已有下載進行中
+        self._diar_downloading = True
+        self.after(0, lambda: threading.Thread(
+            target=self._download_diarization_models, daemon=True
+        ).start())
 
     def _download_diarization_models(self):
         """背景執行緒：下載說話者分離模型，完成後重新載入 DiarizationEngine。"""
@@ -2376,6 +2481,7 @@ class App(ctk.CTk):
                 f"說話者分離模型下載失敗：\n{msg}\n\n請確認網路連線後重試。",
             ))
             self.after(0, lambda: self._set_status("❌ 下載失敗"))
+            self._diar_downloading = False
             return
 
         self.after(0, self._hide_dl_bar)
@@ -2397,6 +2503,8 @@ class App(ctk.CTk):
             self.after(0, lambda: messagebox.showerror(
                 "載入失敗", f"說話者分離模型載入失敗：{err}"
             ))
+        finally:
+            self._diar_downloading = False
 
     def _on_models_failed(self, device: str, reason: str):
         """模型載入失敗：若為 Vulkan（chatllm）後端，自動退回 CPU 重試；
@@ -2553,7 +2661,7 @@ class App(ctk.CTk):
             ensure_ffmpeg(self, on_ready=_on_ffmpeg_ready)
             return   # 等 ensure_ffmpeg 回呼（同步有 ffmpeg 時也會回呼）
 
-        self._ffmpeg_exe = None
+        # 非影片檔案：保留啟動時自動偵測到的 ffmpeg（供設定頁顯示），轉換不會用到
         self._do_start_convert()
 
     def _do_start_convert(self):
@@ -2742,6 +2850,10 @@ class App(ctk.CTk):
         # 停止 Streamlit 服務
         if hasattr(self, "_settings_tab"):
             self._settings_tab.stop_service()
+
+        # 停止 API 服務與對外通道
+        if hasattr(self, "_endpoint_tab"):
+            self._endpoint_tab.stop_all()
 
         # 停止即時錄音（安靜地停，不需要確認）
         if self._rt_mgr:

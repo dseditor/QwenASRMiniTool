@@ -78,6 +78,9 @@ test_audio/
 chatllm/
 chatllmtest/
 
+# ── cloudflared（對外通道二進位，隨用下載，不入庫）────────────────────
+cloudflared/
+
 # ── 其他 ─────────────────────────────────────────────
 .claude/
 *.jpg

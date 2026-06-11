@@ -600,8 +600,10 @@ class ChatLLMASREngine:
         self.cc          = None
         self._runner: _DLLASRRunner | _ChatLLMRunner | None = None
         self._use_dll    = False   # 記錄目前使用哪種模式
-        self.aligner     = None   # Qwen3ForcedAligner（可選，CPU）
+        self.aligner     = None   # 相容旗標（chatllm FA 就緒時為 True）
         self.use_aligner = False  # 是否啟用時間軸對齊
+        self._fa         = None   # ChatLLMAligner（與 OpenVINO 引擎共用）
+        self._fa_bin     = None   # FA .bin 路徑（就緒時非 None）
 
     # ── 載入 ──────────────────────────────────────────────────────────
 
@@ -753,48 +755,27 @@ class ChatLLMASREngine:
     FA_BIN_NAME = "qwen3-focedaligner-0.6b.bin"
 
     def _load_aligner(self, cb=None):
-        """偵測 chatllm 版 ForcedAligner .bin（純 chatllm，無需 torch）。
+        """偵測 chatllm 版 ForcedAligner .bin（委派共用 fa_aligner，無需 torch）。
 
-        chatllm.cpp 原生支援 Qwen3ForcedAligner：給「參考文字 + 音訊」即可
-        輸出字級毫秒時間軸（format json）。此處只驗證 .bin 可用，實際對齊
-        在 _align_chunk() 以 subprocess 呼叫 main.exe 完成。失敗時靜默退回
-        比例估算。
+        與 OpenVINO 引擎共用 fa_aligner.ChatLLMAligner：給「參考文字 + 音訊」
+        即可輸出字級毫秒時間軸。GPU 用 -ngl {id}:all、CPU 用 -ngl 0。
+        缺 .bin 或驗證失敗時靜默退回比例估算。
         """
-        def _s(msg):
-            if cb: cb(msg)
-
+        from fa_aligner import ChatLLMAligner
         self.aligner     = None
         self.use_aligner = False
         self._fa_bin     = None
-
         # FA .bin 與 ASR .bin 放同一資料夾（尊重使用者指定的 model_dir）
-        fa_path = self._model_path.parent / self.FA_BIN_NAME
-        if not fa_path.exists():
-            return
-        try:
-            _s("驗證時間軸對齊模型（chatllm ForcedAligner）…")
-            exe = self._chatllm_dir / "main.exe"
-            r = subprocess.run(
-                [str(exe), "-m", str(fa_path), "-ngl", "0",
-                 "--hide_banner", "--show"],
-                capture_output=True, stdin=subprocess.DEVNULL,
-                text=True, encoding="utf-8", errors="replace",
-                timeout=30, cwd=str(self._chatllm_dir),
-                creationflags=_CREATE_NO_WINDOW, startupinfo=_STARTUP_INFO,
-            )
-            out = r.stdout + r.stderr
-            if "ForcedAligner" not in out:
-                _s("⚠ FA 模型驗證失敗，改用比例估算")
-                return
-            self._fa_bin     = fa_path
-            self.aligner     = True   # 旗標（沿用 use_aligner 判斷流程）
+        self._fa = ChatLLMAligner(
+            fa_dir       = self._model_path.parent,
+            chatllm_dir  = self._chatllm_dir,
+            n_gpu_layers = self._n_gpu_layers,
+            device_id    = self._device_id,
+        )
+        if self._fa.load(cb=cb):
+            self._fa_bin     = self._fa._fa_bin
+            self.aligner     = True   # 相容旗標（沿用 use_aligner 判斷流程）
             self.use_aligner = True
-            _s("時間軸對齊模型就緒（chatllm，無需 torch）")
-        except Exception as _e:
-            _s(f"⚠ ForcedAligner 載入失敗（{_e}），改用比例估算")
-            self.aligner     = None
-            self.use_aligner = False
-            self._fa_bin     = None
 
     def _align_chunk(
         self,
@@ -802,57 +783,10 @@ class ChatLLMASREngine:
         ref_text:  str,
         language:  str = "Chinese",
     ) -> list[tuple[str, float, float]]:
-        """以 chatllm ForcedAligner 對齊「參考文字 + 音訊」，回傳字級時間軸。
-
-        回傳 [(word, start_sec, end_sec), ...]；失敗或無輸出時回傳 []。
-        """
-        if not self._fa_bin:
+        """委派 chatllm FA 對齊，回傳字級 [(word, start_s, end_s), ...]（失敗回 []）。"""
+        if self._fa is None or not self._fa_bin:
             return []
-
-        # CPU → -ngl 0；GPU → -ngl {device_id}:all（與 ASR 同裝置）
-        gpu_args = (["-ngl", f"{self._device_id}:all"]
-                    if self._n_gpu_layers > 0 else ["-ngl", "0"])
-        exe = self._chatllm_dir / "main.exe"
-        prompt = f"{ref_text}{{{{audio:{wav_path}}}}}"
-        cmd = [
-            str(exe), "-m", str(self._fa_bin), *gpu_args, "--hide_banner",
-            "--multimedia_file_tags", "{{", "}}",
-            "-p", prompt,
-            "--set", "format", "json",
-            "--set", "language", language,
-        ]
-        try:
-            r = subprocess.run(
-                cmd, capture_output=True, stdin=subprocess.DEVNULL,
-                text=True, encoding="utf-8", errors="replace",
-                timeout=120, cwd=str(self._chatllm_dir),
-                creationflags=_CREATE_NO_WINDOW, startupinfo=_STARTUP_INFO,
-            )
-        except Exception:
-            return []
-
-        out = r.stdout + r.stderr
-        # 擷取 JSON 陣列（main.exe 末尾會附 timings 文字，需先切出 [...]）
-        i = out.find("[")
-        j = out.rfind("]")
-        if i < 0 or j <= i:
-            return []
-        try:
-            data = json.loads(out[i:j + 1])
-        except (ValueError, json.JSONDecodeError):
-            return []
-
-        items: list[tuple[str, float, float]] = []
-        for d in data:
-            try:
-                w  = str(d["text"])
-                s  = float(d["start"]) / 1000.0   # 毫秒 → 秒
-                e  = float(d["end"])   / 1000.0
-            except (KeyError, TypeError, ValueError):
-                continue
-            if w.strip():
-                items.append((w, s, e))
-        return items
+        return self._fa.align_chunk(wav_path, ref_text, language)
 
     # ── chunk 長度限制 ─────────────────────────────────────────────────
 

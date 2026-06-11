@@ -9,7 +9,8 @@ REM      prompt_template.json
 REM      _internal\         <- Python runtime + packages
 REM      chatllm\           <- v2026.05 chatllm binaries (GPU/CPU backend)
 REM      ffmpeg\            <- bundled ffmpeg.exe (video support)
-REM      start-gpu.bat + app-gpu.py + *.py  <- GPU (PyTorch CUDA) edition
+REM      start-gpu.bat      <- GPU launcher (only GPU file at root)
+REM      cudagpu\           <- GPU edition scripts/models/venv (app-gpu.py + *.py)
 REM
 REM  DISTRIBUTION:
 REM    Run make_release_zip.bat to produce QwenASR_<version>.zip for a
@@ -122,8 +123,15 @@ REM Chinese Windows (cp950 default encoding).
     --add-data "%SRC%\setting.py;." ^
     --add-data "%SRC%\version.py;." ^
     --add-data "%SRC%\updater.py;." ^
+    --add-data "%SRC%\fa_aligner.py;." ^
+    --add-data "%SRC%\api_server.py;." ^
+    --add-data "%SRC%\endpoint_tab.py;." ^
     --hidden-import version ^
     --hidden-import updater ^
+    --hidden-import fa_aligner ^
+    --hidden-import api_server ^
+    --hidden-import endpoint_tab ^
+    --hidden-import segno ^
     %SRC%\app.py
 
 echo.
@@ -162,20 +170,24 @@ echo  WARNING: ffmpeg\ffmpeg.exe not found - users download it at runtime
 :after_ffmpeg
 
 echo.
-REM ===== GPU edition scripts (PyTorch CUDA, runs on system Python) =====
-REM Copied to the app ROOT so start-gpu.bat finds GPUModel\, ov_models\
-REM and app-gpu.py beside itself, exactly as in the source repo layout.
-FOR %%F IN (app-gpu.py streamlit_vulkan.py streamlit_app.py subtitle_editor.py batch_tab.py diarize.py ffmpeg_utils.py chatllm_engine.py processor_numpy.py downloader.py generate_srt.py version.py updater.py requirements-gpu.txt start-gpu.bat) DO IF EXIST "%SRC%\%%F" xcopy "%SRC%\%%F" "%SRC%\dist2\QwenASR\" /Y /Q >nul
-IF EXIST "%SRC%\setting.py"           xcopy "%SRC%\setting.py"           "%SRC%\dist2\QwenASR\" /Y /Q >nul
-IF EXIST "%SRC%\prompt_template.json" xcopy "%SRC%\prompt_template.json" "%SRC%\dist2\QwenASR\" /Y /Q >nul
-echo  GPU edn     : scripts copied to app root (start-gpu.bat, app-gpu.py)
+REM ===== GPU edition (PyTorch CUDA, runs on system Python) =====
+REM Layout: ALL GPU scripts live under dist2\QwenASR\cudagpu\ to keep the
+REM app root tidy. Only start-gpu.bat is exposed at the root; it sets
+REM SCRIPT_DIR=%~dp0cudagpu\ so GPUModel\, ov_models\, venv-gpu\ and
+REM app-gpu.py all resolve inside cudagpu\.
+IF NOT EXIST "%SRC%\dist2\QwenASR\cudagpu\" mkdir "%SRC%\dist2\QwenASR\cudagpu\"
+FOR %%F IN (app-gpu.py streamlit_vulkan.py streamlit_app.py subtitle_editor.py batch_tab.py diarize.py ffmpeg_utils.py chatllm_engine.py fa_aligner.py api_server.py endpoint_tab.py processor_numpy.py downloader.py generate_srt.py version.py updater.py setting.py requirements-gpu.txt) DO IF EXIST "%SRC%\%%F" xcopy "%SRC%\%%F" "%SRC%\dist2\QwenASR\cudagpu\" /Y /Q >nul
+IF EXIST "%SRC%\prompt_template.json" xcopy "%SRC%\prompt_template.json" "%SRC%\dist2\QwenASR\cudagpu\" /Y /Q >nul
+REM Only the launcher is exposed at the package root.
+IF EXIST "%SRC%\start-gpu.bat" xcopy "%SRC%\start-gpu.bat" "%SRC%\dist2\QwenASR\" /Y /Q >nul
+echo  GPU edn     : scripts -> dist2\QwenASR\cudagpu\ ; launcher -> root start-gpu.bat
 
 echo.
 echo  Launcher : dist2\QwenASR\QwenASR.exe   (CPU / Vulkan edition)
 echo  Runtime  : dist2\QwenASR\_internal\
 echo  GPU DLLs : dist2\QwenASR\chatllm\      (~71 MB, Vulkan backend)
 echo  ffmpeg   : dist2\QwenASR\ffmpeg\ffmpeg.exe  (video support)
-echo  GPU edn  : dist2\QwenASR\start-gpu.bat (PyTorch CUDA, app-gpu.py)
+echo  GPU edn  : dist2\QwenASR\start-gpu.bat + cudagpu\ (PyTorch CUDA)
 echo  Update   : in-app check in Settings tab (GitHub Releases)
 echo.
 echo  Next step: run make_release_zip.bat to produce

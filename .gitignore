@@ -10,8 +10,9 @@ dist2/
 build/
 *.spec
 results/
-# ── 發行 ZIP（make_release_zip.bat 產生，上傳至 GitHub Releases）──
+# ── 發行包（make_release_zip.bat 產生，上傳至 GitHub Releases）──
 QwenASR_*.zip
+QwenASR_*.7z
 
 # ── 虛擬環境 ─────────────────────────────────────────
 venv/

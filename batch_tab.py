@@ -357,10 +357,10 @@ class BatchTab(ctk.CTkFrame):
             info = sf.info(str(item.path))
             item.duration = info.duration
         except Exception:
-            try:
-                import librosa
-                item.duration = librosa.get_duration(path=str(item.path))
-            except Exception:
+            # soundfile 讀不了（m4a/影片等）→ audio_io（ffmpeg 後援，無 librosa）
+            from audio_io import audio_duration
+            item.duration = audio_duration(item.path)
+            if not item.duration:
                 return
         try:
             idx = self._items.index(item)

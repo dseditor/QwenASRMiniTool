@@ -33,6 +33,3 @@ tqdm>=4.65.0
 
 # Tokenizer (for BPE context encoding, merges.txt support)
 tokenizers>=0.15.0
-
-# Streamlit web UI (for streamlit_app.py PyTorch frontend)
-streamlit>=1.28.0

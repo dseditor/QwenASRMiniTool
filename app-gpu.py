@@ -142,8 +142,9 @@ def _detect_speech_groups(audio: np.ndarray, vad_sess) -> list[tuple[float, floa
     groups.append((gs, ge))
 
     result = []
+    _tail = int(0.35 * SAMPLE_RATE)   # 多含尾段 0.35s：補捉 Silero 漏掉的句尾輕聲字（的/了/嗎）
     for gs, ge in groups:
-        ch = audio[gs:ge].astype(np.float32)
+        ch = audio[gs: min(len(audio), ge + _tail)].astype(np.float32)
         if len(ch) < SAMPLE_RATE // 2:      # 最小 0.5 秒
             continue
         result.append((gs / SAMPLE_RATE, ge / SAMPLE_RATE, ch))
@@ -416,6 +417,13 @@ def _rebuild_text_with_spaces(raw_chars: list[str]) -> str:
 
 _g_output_simplified: bool = False
 
+# 全域：繁體輸出時是否啟用「簡繁詞彙轉換」（s2twp=開 / s2t=關）
+_g_vocab_convert: bool = True
+
+
+def _opencc_config() -> str:
+    return "s2twp" if _g_vocab_convert else "s2t"
+
 # ══════════════════════════════════════════════════════
 # GPU ASR 引擎
 # ══════════════════════════════════════════════════════
@@ -517,10 +525,18 @@ class GPUASREngine:
                 self.aligner     = None
                 self.use_aligner = False
 
-        self.cc    = opencc.OpenCC("s2twp")
+        self.cc    = opencc.OpenCC(_opencc_config())
         self.ready = True
         aligner_info = "  + ForcedAligner" if self.use_aligner else ""
         _s(f"就緒（{device.upper()}  {ASR_MODEL_NAME}{aligner_info}）")
+
+    def rebuild_cc(self):
+        """依目前詞彙轉換旗標重建 OpenCC 轉換器（免重新載入模型）。"""
+        try:
+            import opencc
+            self.cc = opencc.OpenCC(_opencc_config())
+        except Exception:
+            pass
 
     def transcribe(
         self,
@@ -550,8 +566,8 @@ class GPUASREngine:
         original_path: Path | None = None,
     ) -> Path | None:
         """音檔 → SRT，回傳 SRT 路徑。"""
-        import librosa
-        audio, _ = librosa.load(str(audio_path), sr=SAMPLE_RATE, mono=True)
+        from audio_io import load_audio_16k_mono
+        audio, _ = load_audio_16k_mono(audio_path, SAMPLE_RATE)
 
         use_diar = diarize and self.diar_engine is not None and self.diar_engine.ready
         if use_diar:
@@ -747,10 +763,11 @@ class RealtimeManager:
                 buf.append(chunk); sil += 1
                 if sil >= RT_SILENCE_CHUNKS or len(buf) >= RT_MAX_BUFFER_CHUNKS:
                     audio = np.concatenate(buf)
-                    n = max(1, len(audio) // SAMPLE_RATE) * SAMPLE_RATE
+                    # 不裁切到整秒（processor 會補零到固定長度）；舊版 floor
+                    # 會丟掉尾段最多近 1 秒語音，造成句尾字消失。
                     try:
                         text = self.asr.transcribe(
-                            audio[:n], language=self.language, context=self.context
+                            audio, language=self.language, context=self.context
                         )
                         if text:
                             self.on_text(text)
@@ -784,6 +801,7 @@ class App(ctk.CTk):
         self.engine       = GPUASREngine()
         self._rt_mgr: RealtimeManager | None = None
         self._rt_log: list[str]              = []
+        self._rt_autosave_path: Path | None  = None   # 即時追加保存目標 .txt
         self._audio_file: Path | None        = None
         self._srt_output: Path | None        = None
         self._converting                     = False
@@ -795,6 +813,15 @@ class App(ctk.CTk):
         self._ffmpeg_exe: Path | None        = None  # ffmpeg 路徑（影片處理用）
         self._api_server                     = None   # TranscribeServer（OpenAI 相容端點）
 
+        # 早期套用：介面縮放與鏡像站（須在建構 UI 與引導畫面前生效）
+        try:
+            _early = self._load_settings()
+            ctk.set_widget_scaling(float(_early.get("ui_scale", 1.0)))
+            import downloader as _dl
+            _dl.set_mirror(_early.get("hf_mirror", ""))
+        except Exception:
+            pass
+
         self._build_ui()
         self._detect_devices()
         self._refresh_audio_devices()
@@ -804,51 +831,29 @@ class App(ctk.CTk):
     # ── UI 建構 ────────────────────────────────────────
 
     def _build_ui(self):
-        title_bar = ctk.CTkFrame(self, height=54, corner_radius=0)
-        title_bar.pack(fill="x")
-        title_bar.pack_propagate(False)
+        # ── 標題列（含狀態摘要）─────────────────────────────────────────
+        # dev_bar 的裝置/語系選擇已移至「模型」「設定」分頁，標題列僅保留
+        # 豐富狀態摘要（就緒/核心/裝置/對齊），騰出下方版面空間。
+        header = ctk.CTkFrame(self, corner_radius=0)
+        header.pack(fill="x")
+
+        title_row = ctk.CTkFrame(header, fg_color="transparent", height=54)
+        title_row.pack(fill="x")
+        title_row.pack_propagate(False)
         ctk.CTkLabel(
-            title_bar, text="  🎙 Qwen3 ASR 字幕生成器  ⚡ GPU",
+            title_row, text="  🎙 Qwen3 ASR 字幕生成器  ⚡ GPU",
             font=FONT_TITLE, anchor="w"
         ).pack(side="left", padx=16, pady=8)
 
-        dev_bar = ctk.CTkFrame(self, height=46)
-        dev_bar.pack(fill="x", padx=10, pady=(6, 0))
-        dev_bar.pack_propagate(False)
-
-        ctk.CTkLabel(dev_bar, text="推理裝置：", font=FONT_BODY).pack(
-            side="left", padx=(14, 4), pady=12
-        )
-        self.device_var   = ctk.StringVar(value="CUDA")
-        self.device_combo = ctk.CTkComboBox(
-            dev_bar, values=["CUDA"], variable=self.device_var,
-            width=160, state="disabled", font=FONT_BODY,
-        )
-        self.device_combo.pack(side="left", pady=12)
-
-        self.reload_btn = ctk.CTkButton(
-            dev_bar, text="重新載入", width=90, state="disabled",
-            font=FONT_BODY, fg_color="gray35", hover_color="gray25",
-            command=self._on_reload_models,
-        )
-        self.reload_btn.pack(side="left", padx=8, pady=12)
-
-        ctk.CTkLabel(dev_bar, text="語系：", font=FONT_BODY).pack(
-            side="left", padx=(12, 2), pady=12
-        )
-        self.lang_var   = ctk.StringVar(value="自動偵測")
-        self.lang_combo = ctk.CTkComboBox(
-            dev_bar, values=["自動偵測"] + SUPPORTED_LANGUAGES,
-            variable=self.lang_var,
-            width=130, state="disabled", font=FONT_BODY,
-        )
-        self.lang_combo.pack(side="left", pady=12)
-
         self.status_dot = ctk.CTkLabel(
-            dev_bar, text="⏳ 啟動中…",
-            font=FONT_BODY, text_color="#AAAAAA", anchor="w"
+            title_row, text="⏳ 啟動中…",
+            font=FONT_BODY, text_color="#AAAAAA", anchor="e", justify="right",
         )
-        self.status_dot.pack(side="left", padx=12, pady=12)
+        self.status_dot.pack(side="right", padx=16, pady=8)
+
+        # 進度條（結構保留，GPU 版模型隨附無下載流程，預設不顯示）
+        self.dl_bar = ctk.CTkProgressBar(header, height=6)
+        self.dl_bar.set(0)
 
         self.tabs = ctk.CTkTabview(self, anchor="nw")
         self.tabs.pack(fill="both", expand=True, padx=10, pady=(8, 10))
@@ -856,6 +861,7 @@ class App(ctk.CTk):
         self.tabs.add("  錄製轉換  ")
         self.tabs.add("  批次辨識  ")
         self.tabs.add("  端點  ")
+        self.tabs.add("  模型  ")
         self.tabs.add("  設定  ")
 
         self._build_file_tab(self.tabs.tab("  音檔轉字幕  "))
@@ -866,9 +872,19 @@ class App(ctk.CTk):
         self._endpoint_tab = EndpointTab(self.tabs.tab("  端點  "), self)
         self._endpoint_tab.pack(fill="both", expand=True)
 
+        # 「模型」分頁：裝置選擇（GPU 版模型固定，無模型 combo）+ 模型路徑等
+        from model_tab import ModelTab
+        self._model_tab = ModelTab(
+            self.tabs.tab("  模型  "), self,
+            show_model_select=False, device_default="CUDA",
+        )
+        self._model_tab.pack(fill="both", expand=True)
+
         from setting import SettingsTab
+        # GPU 版語系於建立時即預填完整清單（沿用舊行為），載入完成後轉 readonly
         self._settings_tab = SettingsTab(
-            self.tabs.tab("  設定  "), self, show_service=False)
+            self.tabs.tab("  設定  "), self,
+            lang_values=["自動偵測"] + SUPPORTED_LANGUAGES, lang_state="disabled")
         self._settings_tab.pack(fill="both", expand=True)
 
     # ── 音檔轉字幕 tab ─────────────────────────────────
@@ -1068,6 +1084,23 @@ class App(ctk.CTk):
         )
         self.rt_textbox.pack(fill="both", expand=True, padx=8, pady=(0, 6))
 
+        # 即時追加保存列
+        save_row = ctk.CTkFrame(parent, fg_color="transparent")
+        save_row.pack(fill="x", padx=8, pady=(0, 2))
+
+        self._rt_autosave_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            save_row, text="即時追加保存識別結果",
+            variable=self._rt_autosave_var, font=FONT_BODY,
+            command=self._on_rt_autosave_toggle,
+        ).pack(side="left")
+
+        self._rt_autosave_lbl = ctk.CTkLabel(
+            save_row, text="（每段辨識完成即追加寫入 .txt，可隨時中斷不遺失）",
+            font=("Microsoft JhengHei", 11), text_color="#888888", anchor="w",
+        )
+        self._rt_autosave_lbl.pack(side="left", padx=(8, 0))
+
         act_row = ctk.CTkFrame(parent, fg_color="transparent")
         act_row.pack(fill="x", padx=8, pady=(0, 10))
 
@@ -1142,18 +1175,58 @@ class App(ctk.CTk):
         global VAD_THRESHOLD
         mode = settings.get("appearance_mode", "dark")
         ctk.set_appearance_mode(mode)
+        # 介面縮放
+        try:
+            ctk.set_widget_scaling(float(settings.get("ui_scale", 1.0)))
+        except Exception:
+            pass
+        # 鏡像站
+        try:
+            import downloader as _dl
+            _dl.set_mirror(settings.get("hf_mirror", ""))
+        except Exception:
+            pass
         # VAD 閾值：從設定還原
         vad = settings.get("vad_threshold")
         if vad is not None:
             VAD_THRESHOLD = float(vad)
         if hasattr(self, "_settings_tab"):
             self._settings_tab.sync_prefs(settings)
+        if hasattr(self, "_model_tab"):
+            self._model_tab.sync_prefs(settings)
 
     def _on_chinese_mode_change(self, value: str):
         """輸出模式切換：繁體（OpenCC）or 簡體（直接輸出）。"""
         global _g_output_simplified
         _g_output_simplified = (value == "簡體")
         self._patch_setting("output_simplified", _g_output_simplified)
+
+    def _on_vocab_convert_change(self, on: bool):
+        """簡繁詞彙轉換開關：繁體模式下 s2twp（開）/ s2t（關）。"""
+        global _g_vocab_convert
+        _g_vocab_convert = bool(on)
+        self._patch_setting("vocab_convert", _g_vocab_convert)
+        eng = getattr(self, "engine", None)
+        if eng and hasattr(eng, "rebuild_cc"):
+            eng.rebuild_cc()
+
+    def _on_ui_scale_change(self, scale: float):
+        """介面縮放：等比放大／縮小所有元件與字體。"""
+        try:
+            ctk.set_widget_scaling(float(scale))
+        except Exception:
+            pass
+        self._patch_setting("ui_scale", round(float(scale), 2))
+
+    def _on_mirror_change(self, base: str):
+        """HuggingFace 鏡像站切換：空字串＝官方，否則改寫下載網域。"""
+        base = (base or "").strip()
+        try:
+            import downloader as _dl
+            _dl.set_mirror(base)
+        except Exception:
+            pass
+        self._patch_setting("hf_mirror", base)
 
     def _on_appearance_change(self, value: str):
         """主題切換：深色 🌑 or 淺色 ☀。"""
@@ -1164,8 +1237,9 @@ class App(ctk.CTk):
     def _startup_check(self):
         """背景執行緒：套用 UI 偏好 → 檢查模型存在 → 載入。"""
         settings = self._load_settings()
-        global _g_output_simplified
+        global _g_output_simplified, _g_vocab_convert
         _g_output_simplified = settings.get("output_simplified", False)
+        _g_vocab_convert     = settings.get("vocab_convert", True)
         self.after(0, lambda s=settings: self._apply_ui_prefs(s))
 
         asr_path = GPU_MODEL_DIR / ASR_MODEL_NAME
@@ -1206,7 +1280,7 @@ class App(ctk.CTk):
         self.rt_start_btn.configure(state="normal")
         self.lang_combo.configure(state="readonly")
         device_label = self.device_var.get()
-        self._set_status(f"✅ 就緒（{device_label}）")
+        self._set_status(self._ready_summary(device_label))
         # API 服務：若使用者先前啟用 → 模型就緒後自動開服
         if hasattr(self, "_endpoint_tab"):
             self._endpoint_tab.start_api_if_enabled()
@@ -1254,6 +1328,18 @@ class App(ctk.CTk):
         self.rt_start_btn.configure(state="disabled")
         self.reload_btn.configure(state="disabled")
         threading.Thread(target=self._load_models, daemon=True).start()
+
+    def _ready_summary(self, device_label: str) -> str:
+        """組合頂部標題列的豐富就緒摘要：模型 · 推理核心 · 時間軸對齊狀態。"""
+        import sys as _sys
+        mod = _sys.modules.get(type(self).__module__)
+        model_label = getattr(mod, "ASR_MODEL_NAME", None) or "Qwen3-ASR-1.7B"
+        core = ("CPU 推理" if device_label == "CPU"
+                else f"GPU 推理（{device_label}）")
+        align = ("時間軸對齊已啟用"
+                 if getattr(self.engine, "use_aligner", False)
+                 else "時間軸對齊未啟用")
+        return f"✅ 就緒 · {model_label} · {core} · {align}"
 
     def _set_status(self, msg: str):
         self.after(0, lambda: self.status_dot.configure(text=msg))
@@ -1519,8 +1605,46 @@ class App(ctk.CTk):
         self.rt_start_btn.configure(state="normal")
         self.rt_stop_btn.configure(state="disabled")
 
+    def _on_rt_autosave_toggle(self):
+        """切換即時追加保存。開啟時建立 .txt 並寫入既有內容。"""
+        if self._rt_autosave_var.get():
+            ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = SRT_DIR / f"realtime_{ts}.txt"
+            try:
+                SRT_DIR.mkdir(parents=True, exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    for line in self._rt_log:
+                        f.write(line + "\n")
+                self._rt_autosave_path = path
+                self._rt_autosave_lbl.configure(
+                    text=f"✅ 追加保存中：{path.name}",
+                    text_color=("green", "#88CC88"),
+                )
+            except Exception as e:
+                self._rt_autosave_var.set(False)
+                self._rt_autosave_path = None
+                messagebox.showerror("錯誤", f"無法建立保存檔案：{e}")
+        else:
+            self._rt_autosave_path = None
+            self._rt_autosave_lbl.configure(
+                text="（每段辨識完成即追加寫入 .txt，可隨時中斷不遺失）",
+                text_color="#888888",
+            )
+
+    def _rt_autosave_append(self, line: str):
+        """即時追加單行到保存檔（失敗則靜默停用）。"""
+        path = self._rt_autosave_path
+        if not path:
+            return
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            self._rt_autosave_path = None
+
     def _on_rt_text(self, text: str):
         self._rt_log.append(text)
+        self._rt_autosave_append(text)
         def _do():
             ts = datetime.now().strftime("%H:%M:%S")
             self.rt_textbox.configure(state="normal")

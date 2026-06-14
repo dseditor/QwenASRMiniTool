@@ -141,12 +141,14 @@ def _detect_speech_groups(audio: np.ndarray, vad_sess, max_group_sec: int = MAX_
     groups.append((gs, ge))
 
     result = []
+    _tail = int(0.35 * SAMPLE_RATE)   # 多含尾段 0.35s：補捉 Silero 漏掉的句尾輕聲字（的/了/嗎）
     for gs, ge in groups:
-        ns = max(1, int((ge - gs) // SAMPLE_RATE))
-        ch = audio[gs: gs + ns * SAMPLE_RATE].astype(np.float32)
-        if len(ch) < SAMPLE_RATE:
+        # 取完整語音段並多含一點尾巴；mel 會在 processor 補零到固定長度，整秒對齊
+        # 非必要。舊版 floor 會丟尾段近 1 秒；句尾輕聲字也常被 Silero 的 ge 排除。
+        ch = audio[gs: min(len(audio), ge + _tail)].astype(np.float32)
+        if len(ch) < SAMPLE_RATE // 2:      # 最小 0.5 秒
             continue
-        result.append((gs / SAMPLE_RATE, gs / SAMPLE_RATE + ns, ch))
+        result.append((gs / SAMPLE_RATE, ge / SAMPLE_RATE, ch))
     return result
 
 
@@ -562,6 +564,17 @@ def _rebuild_text_with_spaces(raw_chars: list[str]) -> str:
 # 全域：是否輸出簡體中文（True = 跳過 OpenCC 繁化）
 _g_output_simplified: bool = False
 
+# 全域：繁體輸出時是否啟用「簡繁詞彙轉換」
+#   True  → OpenCC "s2twp"：除字形外，連詞彙也在地化（軟件→軟體、質量→品質）
+#   False → OpenCC "s2t"  ：僅字形轉換，保留原始用詞（軟件、質量）
+# 僅在繁體模式（_g_output_simplified=False）下有意義。
+_g_vocab_convert: bool = True
+
+
+def _opencc_config() -> str:
+    """依目前詞彙轉換旗標回傳對應的 OpenCC 設定名稱。"""
+    return "s2twp" if _g_vocab_convert else "s2t"
+
 # ══════════════════════════════════════════════════════
 # ASR 引擎
 # ══════════════════════════════════════════════════════
@@ -643,7 +656,7 @@ class ASREngine:
         _s("載入 Processor（純 numpy）…")
         self.processor = LightProcessor(ov_dir)
         self.pad_id    = self.processor.pad_id
-        self.cc        = opencc.OpenCC("s2twp")
+        self.cc        = opencc.OpenCC(_opencc_config())
 
         # ── ForcedAligner（chatllm 原生，CPU -ngl 0，無需 torch）──────────
         #    與 ChatLLMASREngine 共用 chatllm main.exe 子程序對齊邏輯。
@@ -661,6 +674,14 @@ class ASREngine:
         self.ready     = True
         aligner_info = "  + ForcedAligner" if self.use_aligner else ""
         _s(f"編譯完成（{device}{aligner_info}）")
+
+    def rebuild_cc(self):
+        """依目前的詞彙轉換旗標重建 OpenCC 轉換器（免重新載入模型）。"""
+        try:
+            import opencc
+            self.cc = opencc.OpenCC(_opencc_config())
+        except Exception:
+            pass
 
     # ── 時間軸對齊（chatllm 原生 FA，CPU -ngl 0）──────────────────────────
     def _load_aligner(self, cb=None):
@@ -794,8 +815,8 @@ class ASREngine:
         diarize    : True 時用說話者分離取代 VAD，SRT 加說話者前綴
         n_speakers : 指定說話者人數（None=自動偵測）
         """
-        import librosa
-        audio, _ = librosa.load(str(audio_path), sr=SAMPLE_RATE, mono=True)
+        from audio_io import load_audio_16k_mono
+        audio, _ = load_audio_16k_mono(audio_path, SAMPLE_RATE)
 
         # ── 分段策略：說話者分離 vs 傳統 VAD ─────────────────────────
         # groups_spk: [(g0_sec, g1_sec, audio_chunk, speaker_label | None), ...]
@@ -1070,11 +1091,12 @@ class RealtimeManager:
                 rt_max_buf = int(getattr(self.asr, "max_chunk_secs", 19) * SAMPLE_RATE / VAD_CHUNK)
                 if sil >= RT_SILENCE_CHUNKS or len(buf) >= rt_max_buf:
                     audio = np.concatenate(buf)
-                    n = max(1, len(audio) // SAMPLE_RATE) * SAMPLE_RATE
+                    # 不裁切到整秒（processor 會補零到固定長度）；舊版 floor
+                    # 會丟掉尾段最多近 1 秒語音，造成句尾字消失。
                     _max_tok = 400 if self.language == "Japanese" else 300
                     try:
                         text = self.asr.transcribe(
-                            audio[:n],
+                            audio,
                             max_tokens=_max_tok,
                             language=self.language,
                             context=self.context,
@@ -1117,6 +1139,7 @@ class App(ctk.CTk):
         self.engine       = ASREngine()
         self._rt_mgr: RealtimeManager | None = None
         self._rt_log: list[str]              = []
+        self._rt_autosave_path: Path | None  = None   # 即時追加保存目標 .txt
         self._audio_file: Path | None        = None
         self._srt_output: Path | None        = None
         self._converting                     = False
@@ -1139,6 +1162,15 @@ class App(ctk.CTk):
         except Exception:
             self._ffmpeg_exe = None
 
+        # ── 早期套用：介面縮放與鏡像站（須在建構 UI 與引導畫面前生效）──
+        try:
+            _early = self._load_settings()
+            ctk.set_widget_scaling(float(_early.get("ui_scale", 1.0)))
+            import downloader as _dl
+            _dl.set_mirror(_early.get("hf_mirror", ""))
+        except Exception:
+            pass
+
         self._build_ui()
         self._detect_all_devices()
         self._refresh_audio_devices()   # 音訊裝置獨立初始化，不依賴模型載入
@@ -1148,69 +1180,29 @@ class App(ctk.CTk):
     # ── UI 建構 ────────────────────────────────────────
 
     def _build_ui(self):
-        # 標題列
-        title_bar = ctk.CTkFrame(self, height=54, corner_radius=0)
-        title_bar.pack(fill="x")
-        title_bar.pack_propagate(False)
+        # ── 標題列（含狀態摘要 + 下載進度條）─────────────────────────────
+        # dev_bar 的模型/裝置/語系選擇已移至「模型」「設定」分頁，標題列僅
+        # 保留豐富狀態摘要（就緒/核心/裝置/對齊），騰出下方版面空間。
+        header = ctk.CTkFrame(self, corner_radius=0)
+        header.pack(fill="x")
+
+        title_row = ctk.CTkFrame(header, fg_color="transparent", height=54)
+        title_row.pack(fill="x")
+        title_row.pack_propagate(False)
         ctk.CTkLabel(
-            title_bar, text="  🎙 Qwen3 ASR 字幕生成器",
+            title_row, text="  🎙 Qwen3 ASR 字幕生成器",
             font=FONT_TITLE, anchor="w"
         ).pack(side="left", padx=16, pady=8)
 
-        # 裝置選擇列
-        dev_bar = ctk.CTkFrame(self, height=46)
-        dev_bar.pack(fill="x", padx=10, pady=(6, 0))
-        dev_bar.pack_propagate(False)
-
-        ctk.CTkLabel(dev_bar, text="模型：", font=FONT_BODY).pack(
-            side="left", padx=(14, 4), pady=12
-        )
-        self.model_var   = ctk.StringVar(value="Qwen3-ASR-0.6B")
-        self.model_combo = ctk.CTkComboBox(
-            dev_bar,
-            values=["Qwen3-ASR-0.6B", "Qwen3-ASR-1.7B INT8"],
-            variable=self.model_var,
-            width=160, state="readonly", font=FONT_BODY,
-        )
-        self.model_combo.pack(side="left", pady=12)
-
-        ctk.CTkLabel(dev_bar, text="推理裝置：", font=FONT_BODY).pack(
-            side="left", padx=(12, 4), pady=12
-        )
-        self.device_var   = ctk.StringVar(value="CPU")
-        self.device_combo = ctk.CTkComboBox(
-            dev_bar, values=["CPU"], variable=self.device_var,
-            width=110, state="disabled", font=FONT_BODY,
-        )
-        self.device_combo.pack(side="left", pady=12)
-
-        self.reload_btn = ctk.CTkButton(
-            dev_bar, text="重新載入", width=90, state="disabled",
-            font=FONT_BODY, fg_color="gray35", hover_color="gray25",
-            command=self._on_reload_models,
-        )
-        self.reload_btn.pack(side="left", padx=8, pady=12)
-
-        ctk.CTkLabel(dev_bar, text="語系：", font=FONT_BODY).pack(
-            side="left", padx=(12, 2), pady=12
-        )
-        self.lang_var   = ctk.StringVar(value="自動偵測")
-        self.lang_combo = ctk.CTkComboBox(
-            dev_bar, values=["自動偵測"], variable=self.lang_var,
-            width=130, state="disabled", font=FONT_BODY,
-        )
-        self.lang_combo.pack(side="left", pady=12)
-
         self.status_dot = ctk.CTkLabel(
-            dev_bar, text="⏳ 啟動中…",
-            font=FONT_BODY, text_color="#AAAAAA", anchor="w"
+            title_row, text="⏳ 啟動中…",
+            font=FONT_BODY, text_color="#AAAAAA", anchor="e", justify="right",
         )
-        self.status_dot.pack(side="left", padx=12, pady=12)
+        self.status_dot.pack(side="right", padx=16, pady=8)
 
-        # 下載進度條（正常情況下隱藏）
-        self.dl_bar = ctk.CTkProgressBar(dev_bar, width=200, height=12)
+        # 下載進度條（正常隱藏，由 _show_dl_bar / _hide_dl_bar 控制，置於標題列下緣）
+        self.dl_bar = ctk.CTkProgressBar(header, height=6)
         self.dl_bar.set(0)
-        # 啟動時不 pack，由 _show_dl_bar / _hide_dl_bar 控制
 
         # 分頁
         self.tabs = ctk.CTkTabview(self, anchor="nw")
@@ -1219,6 +1211,7 @@ class App(ctk.CTk):
         self.tabs.add("  批次辨識  ")
         self.tabs.add("  錄製轉換  ")
         self.tabs.add("  端點  ")
+        self.tabs.add("  模型  ")
         self.tabs.add("  設定  ")
 
         self._build_file_tab(self.tabs.tab("  音檔轉字幕  "))
@@ -1229,11 +1222,18 @@ class App(ctk.CTk):
         self._endpoint_tab = EndpointTab(self.tabs.tab("  端點  "), self)
         self._endpoint_tab.pack(fill="both", expand=True)
 
+        # 「模型」分頁：引擎/裝置/模型選擇 + 模型路徑/下載來源/CPU 效能
+        #   widget 建立後回寫 self.device_var/device_combo/model_var/model_combo/
+        #   reload_btn，既有 _on_models_ready / _detect_all_devices 邏輯零修改。
+        from model_tab import ModelTab
+        self._model_tab = ModelTab(
+            self.tabs.tab("  模型  "), self,
+            show_model_select=True, device_default="CPU",
+        )
+        self._model_tab.pack(fill="both", expand=True)
+
         from setting import SettingsTab
-        self._settings_tab = SettingsTab(
-            self.tabs.tab("  設定  "), self,
-            # 編譯版（frozen）不含 streamlit，服務 tab 僅在開發模式顯示
-            show_service=not getattr(sys, "frozen", False))
+        self._settings_tab = SettingsTab(self.tabs.tab("  設定  "), self)
         self._settings_tab.pack(fill="both", expand=True)
 
     # ── 批次辨識 tab ───────────────────────────────────
@@ -1470,6 +1470,23 @@ class App(ctk.CTk):
             parent, font=("Microsoft JhengHei", 15), state="disabled",
         )
         self.rt_textbox.pack(fill="both", expand=True, padx=8, pady=(0, 6))
+
+        # 即時追加保存列
+        save_row = ctk.CTkFrame(parent, fg_color="transparent")
+        save_row.pack(fill="x", padx=8, pady=(0, 2))
+
+        self._rt_autosave_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            save_row, text="即時追加保存識別結果",
+            variable=self._rt_autosave_var, font=FONT_BODY,
+            command=self._on_rt_autosave_toggle,
+        ).pack(side="left")
+
+        self._rt_autosave_lbl = ctk.CTkLabel(
+            save_row, text="（每段辨識完成即追加寫入 .txt，可隨時中斷不遺失）",
+            font=("Microsoft JhengHei", 11), text_color="#888888", anchor="w",
+        )
+        self._rt_autosave_lbl.pack(side="left", padx=(8, 0))
 
         # 操作列
         act_row = ctk.CTkFrame(parent, fg_color="transparent")
@@ -1772,12 +1789,25 @@ class App(ctk.CTk):
         global VAD_THRESHOLD
         mode = settings.get("appearance_mode", "dark")
         ctk.set_appearance_mode(mode)
+        # 介面縮放
+        try:
+            ctk.set_widget_scaling(float(settings.get("ui_scale", 1.0)))
+        except Exception:
+            pass
+        # 鏡像站
+        try:
+            import downloader as _dl
+            _dl.set_mirror(settings.get("hf_mirror", ""))
+        except Exception:
+            pass
         # VAD 閾值：從設定還原
         vad = settings.get("vad_threshold")
         if vad is not None:
             VAD_THRESHOLD = float(vad)
         if hasattr(self, "_settings_tab"):
             self._settings_tab.sync_prefs(settings)
+        if hasattr(self, "_model_tab"):
+            self._model_tab.sync_prefs(settings)
 
     def _on_chinese_mode_change(self, value: str):
         """輸出模式切換：繁體（OpenCC）or 簡體（直接輸出）。"""
@@ -1794,6 +1824,38 @@ class App(ctk.CTk):
         mode = "light" if value == "☀" else "dark"
         ctk.set_appearance_mode(mode)
         self._patch_setting("appearance_mode", mode)
+
+    def _on_vocab_convert_change(self, on: bool):
+        """簡繁詞彙轉換開關：繁體模式下 s2twp（開）/ s2t（關）。"""
+        global _g_vocab_convert
+        _g_vocab_convert = bool(on)
+        self._patch_setting("vocab_convert", _g_vocab_convert)
+        # 即時重建目前引擎的 OpenCC 轉換器（免重新載入模型）
+        eng = getattr(self, "engine", None)
+        if eng and hasattr(eng, "rebuild_cc"):
+            eng.rebuild_cc()
+        # 同步 chatllm_engine 模組旗標（ChatLLM 後端使用）
+        if _CHATLLM_AVAILABLE:
+            import chatllm_engine as _ce
+            _ce._vocab_convert = _g_vocab_convert
+
+    def _on_ui_scale_change(self, scale: float):
+        """介面縮放：等比放大／縮小所有元件與字體（高 DPI 螢幕適用）。"""
+        try:
+            ctk.set_widget_scaling(float(scale))
+        except Exception:
+            pass
+        self._patch_setting("ui_scale", round(float(scale), 2))
+
+    def _on_mirror_change(self, base: str):
+        """HuggingFace 鏡像站切換：空字串＝官方，否則改寫下載網域。"""
+        base = (base or "").strip()
+        try:
+            import downloader as _dl
+            _dl.set_mirror(base)
+        except Exception:
+            pass
+        self._patch_setting("hf_mirror", base)
 
     def _settings_valid(self, s: dict) -> bool:
         """檢查設定是否足夠完整（不需要重新引導）。"""
@@ -1864,13 +1926,15 @@ class App(ctk.CTk):
 
         self._settings = settings
 
-        # 套用 UI 偏好（簡繁模式 + 外觀主題）
-        global _g_output_simplified
+        # 套用 UI 偏好（簡繁模式 + 詞彙轉換 + 外觀主題）
+        global _g_output_simplified, _g_vocab_convert
         _g_output_simplified = settings.get("output_simplified", False)
+        _g_vocab_convert     = settings.get("vocab_convert", True)
         # 同步 chatllm_engine 模組旗標
         if _CHATLLM_AVAILABLE:
             import chatllm_engine as _ce
             _ce._output_simplified = _g_output_simplified
+            _ce._vocab_convert     = _g_vocab_convert
         self.after(0, lambda s=settings: self._apply_ui_prefs(s))
 
         # 同步 device_combo 到已儲存的裝置
@@ -2061,6 +2125,41 @@ class App(ctk.CTk):
             command=_browse_dir,
         ).pack(side="left", padx=(6, 0))
 
+        # ── 下載來源（HuggingFace 鏡像站）──────────────────────────────
+        saved_mirror = (self._load_settings().get("hf_mirror", "") or "").strip()
+        mirror_frame = ctk.CTkFrame(scroll, fg_color="transparent")
+        mirror_frame.pack(fill="x", padx=24, pady=(0, 8))
+        ctk.CTkLabel(mirror_frame, text="下載來源：", font=FONT_BODY).pack(
+            side="left", padx=(0, 6)
+        )
+        mirror_seg = ctk.CTkSegmentedButton(
+            mirror_frame, values=["官方 HF", "鏡像站"],
+            width=150, height=30, font=FONT_BODY,
+        )
+        mirror_entry_var = ctk.StringVar(
+            value=saved_mirror or "https://hf-mirror.com"
+        )
+        mirror_entry = ctk.CTkEntry(
+            mirror_frame, textvariable=mirror_entry_var, width=210, font=FONT_BODY,
+        )
+
+        def _on_onb_mirror(_v=None):
+            use = "鏡" in mirror_seg.get()
+            mirror_entry.configure(state="normal" if use else "disabled")
+
+        mirror_seg.configure(command=_on_onb_mirror)
+        mirror_seg.set("鏡像站" if saved_mirror else "官方 HF")
+        mirror_seg.pack(side="left")
+        mirror_entry.pack(side="left", padx=(8, 0))
+        _on_onb_mirror()
+
+        ctk.CTkLabel(
+            scroll,
+            text="直連 huggingface.co 緩慢或逾時時，可改用鏡像站（預設 hf-mirror.com）。",
+            font=("Microsoft JhengHei", 11), text_color="#888888", anchor="w",
+            wraplength=560, justify="left",
+        ).pack(fill="x", padx=24, pady=(0, 8))
+
         # ── 下載進度條（平時隱藏）──────────────────────────────────────
         prog_frame = ctk.CTkFrame(scroll, fg_color="transparent")
         prog_frame.pack(fill="x", padx=24, pady=(0, 8))
@@ -2097,12 +2196,19 @@ class App(ctk.CTk):
 
         def _do_download():
             """背景執行緒：執行下載動作，完成後關閉引導畫面。"""
+            import downloader as _dl
             from downloader import (quick_check, download_all,
                                     quick_check_1p7b, download_1p7b)
 
             backend    = backend_var.get()
             model_path = Path(path_var.get().strip())
             model_path.mkdir(parents=True, exist_ok=True)
+
+            # 套用下載來源（鏡像站）並記住，供後續更新沿用
+            mirror_base = (mirror_entry_var.get().strip()
+                           if "鏡" in mirror_seg.get() else "")
+            _dl.set_mirror(mirror_base)
+            self._patch_setting("hf_mirror", mirror_base)
 
             # 禁用按鈕
             dlg.after(0, lambda: confirm_btn.configure(state="disabled", text="⏳  下載中…"))
@@ -2132,9 +2238,9 @@ class App(ctk.CTk):
 
                         def _dl_bin():
                             import ssl, urllib.request
-                            from downloader import _ssl_ctx
+                            from downloader import _ssl_ctx, _apply_mirror
                             req = urllib.request.Request(
-                                url,
+                                _apply_mirror(url),
                                 headers={"User-Agent": "Mozilla/5.0 (compatible; QwenASR)"}
                             )
                             with urllib.request.urlopen(req, context=_ssl_ctx()) as resp, \
@@ -2218,7 +2324,8 @@ class App(ctk.CTk):
         self.after(0, lambda: self._set_status(f"⬇ {msg} ({pct*100:.0f}%)"))
 
     def _show_dl_bar(self):
-        self.dl_bar.pack(side="left", padx=(0, 8), pady=12)
+        # 置於標題列下緣，橫跨整個寬度
+        self.dl_bar.pack(fill="x", side="bottom")
 
     def _hide_dl_bar(self):
         self.dl_bar.pack_forget()
@@ -2397,7 +2504,7 @@ class App(ctk.CTk):
                 values=["1.7B Q8_0 (Vulkan GPU)"], state="disabled"
             )
             self.model_var.set("1.7B Q8_0 (Vulkan GPU)")
-            self._set_status(f"✅ 就緒（Vulkan GPU）")
+            self._set_status(self._ready_summary(device, backend))
         else:
             # OpenVINO：顯示 0.6B / 1.7B INT8
             self.model_combo.configure(
@@ -2405,7 +2512,7 @@ class App(ctk.CTk):
             )
             sz = settings.get("cpu_model_size", "0.6B")
             self.model_var.set("Qwen3-ASR-1.7B INT8" if "1.7B" in sz else "Qwen3-ASR-0.6B")
-            self._set_status(f"✅ 就緒（{device}）")
+            self._set_status(self._ready_summary(device, backend))
 
         # 填入語系清單（模型載入後才知道 supported_languages）
         if self.engine.processor and self.engine.processor.supported_languages:
@@ -2572,6 +2679,20 @@ class App(ctk.CTk):
         self.rt_start_btn.configure(state="disabled")
         self.reload_btn.configure(state="disabled")
         threading.Thread(target=self._load_models, daemon=True).start()
+
+    def _ready_summary(self, device: str, backend: str) -> str:
+        """組合頂部標題列的豐富就緒摘要：模型 · 推理核心 · 時間軸對齊狀態。"""
+        model_label = self.model_var.get()
+        if backend == "chatllm":
+            core = "GPU 推理（Vulkan）"
+        elif device == "CPU":
+            core = "CPU 推理"
+        else:
+            core = f"GPU 推理（{device}）"
+        align = ("時間軸對齊已啟用"
+                 if getattr(self.engine, "use_aligner", False)
+                 else "時間軸對齊未啟用")
+        return f"✅ 就緒 · {model_label} · {core} · {align}"
 
     def _set_status(self, msg: str):
         self.after(0, lambda: self.status_dot.configure(text=msg))
@@ -2800,8 +2921,48 @@ class App(ctk.CTk):
         self.rt_start_btn.configure(state="normal")
         self.rt_stop_btn.configure(state="disabled")
 
+    def _on_rt_autosave_toggle(self):
+        """切換即時追加保存。開啟時建立 .txt 並寫入既有內容。"""
+        if self._rt_autosave_var.get():
+            ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = SRT_DIR / f"realtime_{ts}.txt"
+            try:
+                SRT_DIR.mkdir(parents=True, exist_ok=True)
+                # 先寫入目前已累積的內容，之後逐段追加
+                with open(path, "w", encoding="utf-8") as f:
+                    for line in self._rt_log:
+                        f.write(line + "\n")
+                self._rt_autosave_path = path
+                self._rt_autosave_lbl.configure(
+                    text=f"✅ 追加保存中：{path.name}",
+                    text_color=("green", "#88CC88"),
+                )
+            except Exception as e:
+                self._rt_autosave_var.set(False)
+                self._rt_autosave_path = None
+                messagebox.showerror("錯誤", f"無法建立保存檔案：{e}")
+        else:
+            self._rt_autosave_path = None
+            self._rt_autosave_lbl.configure(
+                text="（每段辨識完成即追加寫入 .txt，可隨時中斷不遺失）",
+                text_color="#888888",
+            )
+
+    def _rt_autosave_append(self, line: str):
+        """即時追加單行到保存檔（背景安全；失敗則靜默停用）。"""
+        path = self._rt_autosave_path
+        if not path:
+            return
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            self._rt_autosave_path = None
+
     def _on_rt_text(self, text: str):
         self._rt_log.append(text)
+        # 即時追加保存（在背景執行緒即寫入，確保中斷不遺失）
+        self._rt_autosave_append(text)
         def _do():
             ts = datetime.now().strftime("%H:%M:%S")
             self.rt_textbox.configure(state="normal")
@@ -2846,10 +3007,6 @@ class App(ctk.CTk):
                 default="no",
             ):
                 return
-
-        # 停止 Streamlit 服務
-        if hasattr(self, "_settings_tab"):
-            self._settings_tab.stop_service()
 
         # 停止 API 服務與對外通道
         if hasattr(self, "_endpoint_tab"):

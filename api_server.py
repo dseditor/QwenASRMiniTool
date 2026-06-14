@@ -343,83 +343,247 @@ _UNAUTH_HTML = """<!DOCTYPE html>
 
 
 # ── 內嵌上傳網頁（self-contained，無 CDN，可離線）─────────────────────
+#    設計：玻璃質感深色介面、漸層強調、行動優先（響應式 grid + 44px 觸控目標）。
+#    功能：① 檔案上傳轉錄 ② 即時錄音（停頓自動切段 / 按停止 → 上傳辨識）。
+#    注意：此為純標準庫伺服器吐出的「單一自包含 HTML 字串」，刻意不引入任何
+#    CDN / 建置步驟，以維持零依賴並可內嵌 EXE、離線可用。
 _INDEX_HTML = """<!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1117">
 <title>QwenASR 轉錄服務</title>
 <style>
-  :root { --bg:#1b1d23; --card:#252830; --fg:#e6e8ee; --mut:#8b94a6; --acc:#4a90d9; }
-  * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg);
-         font-family:"Microsoft JhengHei","Segoe UI",sans-serif; }
-  .wrap { max-width:760px; margin:0 auto; padding:28px 18px 60px; }
-  h1 { font-size:20px; font-weight:700; margin:0 0 4px; }
-  .sub { color:var(--mut); font-size:13px; margin-bottom:20px; }
-  .card { background:var(--card); border-radius:12px; padding:18px; margin-bottom:16px; }
-  .drop { border:2px dashed #3a3f4b; border-radius:10px; padding:30px; text-align:center;
-          color:var(--mut); cursor:pointer; transition:.15s; }
-  .drop.hot { border-color:var(--acc); color:var(--fg); background:#2b2f3a; }
-  .drop b { color:var(--fg); }
-  .row { display:flex; gap:14px; flex-wrap:wrap; margin-top:14px; align-items:center; }
-  label { font-size:13px; color:var(--mut); display:flex; gap:6px; align-items:center; }
-  select, input[type=number] { background:#1b1d23; color:var(--fg); border:1px solid #3a3f4b;
-          border-radius:6px; padding:5px 8px; font-size:13px; }
-  button { background:var(--acc); color:#fff; border:0; border-radius:8px; padding:10px 22px;
-           font-size:15px; cursor:pointer; margin-top:16px; }
-  button:disabled { opacity:.5; cursor:default; }
-  pre { white-space:pre-wrap; word-break:break-word; background:#15171c; border-radius:8px;
-        padding:14px; font-size:13px; max-height:46vh; overflow:auto; margin:0; }
-  .bar { display:flex; gap:10px; margin-bottom:8px; }
-  .bar button { margin:0; padding:6px 14px; font-size:13px; background:#3a3f4b; }
-  .status { color:var(--mut); font-size:13px; margin-top:10px; min-height:18px; }
+  :root{
+    --bg0:#0f1117; --fg:#eef1f7; --mut:#9aa3b2; --line:rgba(255,255,255,.09);
+    --card:rgba(255,255,255,.045); --acc:#4a90d9; --acc2:#5ec8c0; --danger:#ef5a6f;
+  }
+  *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body{ margin:0; }
+  body{
+    color:var(--fg); font-size:15px; line-height:1.5;
+    font-family:"Microsoft JhengHei","Segoe UI",system-ui,-apple-system,sans-serif;
+    background:
+      radial-gradient(1100px 560px at 78% -12%, rgba(74,144,217,.20), transparent 58%),
+      radial-gradient(900px 500px at -10% 8%, rgba(94,200,192,.12), transparent 55%),
+      linear-gradient(180deg,#0f1117 0%, #0b0d13 100%);
+    background-attachment:fixed; min-height:100vh;
+  }
+  .wrap{ max-width:740px; margin:0 auto; padding:max(22px,env(safe-area-inset-top)) 16px 64px; }
+
+  /* 頁首 */
+  .head{ display:flex; align-items:center; gap:12px; margin-bottom:18px; }
+  .mark{ width:44px; height:44px; border-radius:13px; display:grid; place-items:center;
+    font-size:22px; background:linear-gradient(135deg,var(--acc),#3a78c0);
+    box-shadow:0 8px 22px rgba(74,144,217,.40); flex:0 0 auto; }
+  .head h1{ font-size:19px; font-weight:800; margin:0; letter-spacing:.2px; }
+  .head .sub{ color:var(--mut); font-size:12.5px; margin-top:2px; }
+
+  /* 卡片（玻璃質感） */
+  .card{ background:var(--card); border:1px solid var(--line); border-radius:18px;
+    padding:18px; margin-bottom:16px; backdrop-filter:blur(14px);
+    -webkit-backdrop-filter:blur(14px); box-shadow:0 10px 30px rgba(0,0,0,.28); }
+
+  /* 模式切換（segmented） */
+  .seg{ display:flex; gap:5px; padding:5px; margin-bottom:16px; width:100%;
+    background:rgba(255,255,255,.05); border:1px solid var(--line); border-radius:14px; }
+  .seg button{ flex:1; background:transparent; color:var(--mut); border:0; cursor:pointer;
+    padding:11px 10px; border-radius:10px; font-size:14px; font-weight:600; transition:.18s; }
+  .seg button.on{ color:#fff; background:linear-gradient(135deg,var(--acc),#3a78c0);
+    box-shadow:0 6px 16px rgba(74,144,217,.38); }
+
+  /* 拖放區 */
+  .drop{ border:1.5px dashed var(--line); border-radius:14px; padding:30px 16px;
+    text-align:center; color:var(--mut); cursor:pointer; transition:.18s; }
+  .drop:hover{ border-color:rgba(74,144,217,.6); }
+  .drop.hot{ border-color:var(--acc); color:var(--fg); background:rgba(74,144,217,.10); }
+  .drop b{ color:var(--acc); }
+  .fname{ margin-top:10px; color:var(--acc2); font-size:13px; word-break:break-all; }
+
+  /* 選項 grid */
+  .opts{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+    gap:12px; margin-top:16px; }
+  .fld{ display:flex; flex-direction:column; gap:5px; font-size:12.5px; color:var(--mut); }
+  select{ width:100%; background:rgba(0,0,0,.28); color:var(--fg);
+    border:1px solid var(--line); border-radius:10px; padding:10px 10px; font-size:14px;
+    appearance:none; }
+  .checks{ display:flex; gap:18px; flex-wrap:wrap; margin-top:14px; }
+  .chk{ display:flex; align-items:center; gap:7px; font-size:13.5px; color:var(--fg);
+    cursor:pointer; }
+  .chk input{ width:18px; height:18px; accent-color:var(--acc); }
+
+  /* 按鈕 */
+  .btn{ width:100%; margin-top:16px; border:0; border-radius:13px; cursor:pointer;
+    padding:14px; font-size:15.5px; font-weight:700; color:#fff;
+    background:linear-gradient(135deg,var(--acc),#3a78c0);
+    box-shadow:0 8px 20px rgba(74,144,217,.34); transition:.15s; }
+  .btn:active{ transform:translateY(1px); }
+  .btn:disabled{ opacity:.45; box-shadow:none; cursor:default; }
+  .status{ color:var(--mut); font-size:13px; margin-top:12px; min-height:18px; text-align:center; }
+
+  /* 錄音區 */
+  .rec-wrap{ display:flex; flex-direction:column; align-items:center; gap:14px; padding:8px 0; }
+  .mic{ width:96px; height:96px; border-radius:50%; border:0; cursor:pointer; font-size:38px;
+    color:#fff; display:grid; place-items:center; transition:.15s;
+    background:linear-gradient(135deg,var(--acc),#3a78c0);
+    box-shadow:0 10px 26px rgba(74,144,217,.40); }
+  .mic:active{ transform:scale(.96); }
+  .mic.rec{ background:linear-gradient(135deg,var(--danger),#c8344a);
+    animation:pulse 1.5s infinite; }
+  @keyframes pulse{
+    0%{ box-shadow:0 0 0 0 rgba(239,90,111,.55); }
+    70%{ box-shadow:0 0 0 24px rgba(239,90,111,0); }
+    100%{ box-shadow:0 0 0 0 rgba(239,90,111,0); } }
+  .mic:disabled{ opacity:.45; cursor:default; box-shadow:none; }
+  .meter{ width:200px; max-width:70%; height:8px; border-radius:6px;
+    background:rgba(255,255,255,.10); overflow:hidden; }
+  .meter > i{ display:block; height:100%; width:0%;
+    background:linear-gradient(90deg,var(--acc2),var(--acc)); transition:width .08s linear; }
+  .rec-hint{ color:var(--mut); font-size:12.5px; text-align:center; }
+  .warn{ color:#f4b860; font-size:12.5px; text-align:center; line-height:1.55; }
+
+  /* 結果 */
+  .res-head{ display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
+  .res-head .t{ font-size:14px; font-weight:700; }
+  .tools{ display:flex; gap:8px; }
+  .tool{ background:rgba(255,255,255,.07); color:var(--fg); border:1px solid var(--line);
+    border-radius:9px; padding:7px 14px; font-size:13px; cursor:pointer; transition:.15s; }
+  .tool:active{ transform:translateY(1px); }
+  pre{ white-space:pre-wrap; word-break:break-word; margin:0; font-size:13.5px;
+    background:rgba(0,0,0,.30); border:1px solid var(--line); border-radius:12px;
+    padding:14px; max-height:44vh; overflow:auto; line-height:1.6;
+    font-family:"SFMono-Regular",Consolas,"Microsoft JhengHei",monospace; }
+  pre::-webkit-scrollbar{ width:9px; } pre::-webkit-scrollbar-thumb{
+    background:rgba(255,255,255,.14); border-radius:8px; }
+  .foot{ text-align:center; color:var(--mut); font-size:11.5px; margin-top:8px; }
+  .hidden{ display:none !important; }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>QwenASR 轉錄服務</h1>
-  <div class="sub">上傳音檔／影片 → 取得字幕（OpenAI 相容端點 /v1/audio/transcriptions）</div>
-
-  <div class="card">
-    <div id="drop" class="drop">拖放音檔／影片到這裡，或 <b>點此選擇</b>
-      <div id="fname" style="margin-top:8px;color:var(--acc)"></div>
+  <div class="head">
+    <div class="mark">&#127908;</div>
+    <div>
+      <h1>QwenASR 轉錄服務</h1>
+      <div class="sub">上傳或錄音 → 取得字幕 · OpenAI 相容端點</div>
     </div>
-    <input id="file" type="file" accept="audio/*,video/*" style="display:none">
-    <div class="row">
-      <label>語言
+  </div>
+
+  <div class="seg">
+    <button id="m-file" class="on">&#128193; 上傳檔案</button>
+    <button id="m-rec">&#127908; 即時錄音</button>
+  </div>
+
+  <!-- 上傳模式 -->
+  <div id="pane-file" class="card">
+    <div id="drop" class="drop">拖放音檔／影片到這裡，或 <b>點此選擇</b>
+      <div id="fname" class="fname"></div>
+    </div>
+    <input id="file" type="file" accept="audio/*,video/*" class="hidden">
+    <button id="go" class="btn" disabled>開始轉錄</button>
+    <div id="status" class="status"></div>
+  </div>
+
+  <!-- 錄音模式 -->
+  <div id="pane-rec" class="card hidden">
+    <div class="rec-wrap">
+      <button id="mic" class="mic">&#127908;</button>
+      <div class="meter"><i id="lvl"></i></div>
+      <div id="rec-status" class="rec-hint">按麥克風開始錄音。說完停頓約 2 秒自動上傳；句中短暫停頓不會中斷，不必趕著講。</div>
+      <div id="rec-warn" class="warn hidden"></div>
+    </div>
+  </div>
+
+  <!-- 共用選項 -->
+  <div class="card">
+    <div class="opts">
+      <label class="fld">語言
         <select id="lang">
           <option value="">自動偵測</option>
           <option>Chinese</option><option>English</option><option>Japanese</option>
-          <option>Korean</option><option>Cantonese</option>
+          <option>Korean</option><option>Cantonese</option><option>French</option>
+          <option>German</option><option>Spanish</option><option>Russian</option>
         </select>
       </label>
-      <label>輸出
+      <label class="fld">輸出格式
         <select id="fmt">
           <option value="srt">SRT 字幕</option>
           <option value="text">純文字</option>
           <option value="verbose_json">verbose_json</option>
         </select>
       </label>
-      <label><input id="align" type="checkbox" checked> 時間軸對齊</label>
-      <label><input id="diar" type="checkbox"> 說話者分離</label>
     </div>
-    <button id="go" disabled>開始轉錄</button>
-    <div id="status" class="status"></div>
+    <div class="checks">
+      <label class="chk"><input id="align" type="checkbox" checked> 時間軸對齊</label>
+      <label class="chk"><input id="diar" type="checkbox"> 說話者分離</label>
+    </div>
   </div>
 
+  <!-- 結果 -->
   <div class="card">
-    <div class="bar">
-      <button id="copy">複製</button>
-      <button id="dl">下載 .srt</button>
+    <div class="res-head">
+      <span class="t">辨識結果</span>
+      <div class="tools">
+        <button id="clear" class="tool">清除</button>
+        <button id="copy" class="tool">複製</button>
+        <button id="dl" class="tool">下載</button>
+      </div>
     </div>
     <pre id="out">（結果會顯示在這裡）</pre>
   </div>
+  <div class="foot">QwenASR · 本地推理 · 資料不離開你的伺服器</div>
 </div>
 <script>
 const $ = s => document.querySelector(s);
 const KEY = new URLSearchParams(location.search).get('k') || '';
-let picked = null;
+const fmt = () => $("#fmt").value;
+let picked = null, lastName = "transcript";
+
+/* ── 共用上傳 ─────────────────────────────────────────────── */
+async function upload(blob, filename, statusEl, append){
+  const fd = new FormData();
+  fd.append("file", blob, filename);
+  fd.append("language", $("#lang").value);
+  fd.append("response_format", fmt());
+  fd.append("align", $("#align").checked ? "1":"0");
+  fd.append("diarize", $("#diar").checked ? "1":"0");
+  const t0 = Date.now();
+  if(statusEl) statusEl.textContent = "辨識中…";
+  const r = await fetch("/v1/audio/transcriptions?k="+encodeURIComponent(KEY),
+        {method:"POST", body:fd, headers: KEY ? {"Authorization":"Bearer "+KEY} : {}});
+  const ctype = r.headers.get("Content-Type")||"";
+  let text;
+  if(ctype.includes("application/json")){
+    const j = await r.json();
+    if(j.error){ throw new Error(j.error.message||"server error"); }
+    text = j.segments ? JSON.stringify(j, null, 2) : (j.text||"");
+  } else { text = await r.text(); }
+  const out = $("#out");
+  if(append){
+    const t = (text||"").trim();
+    if(t){ out.textContent = (out.dataset.has ? out.textContent + "\\n" : "") + t; out.dataset.has = "1"; }
+  } else {
+    out.textContent = text || "（無內容）"; out.dataset.has = text ? "1" : "";
+  }
+  out.scrollTop = out.scrollHeight;
+  if(statusEl) statusEl.textContent = "完成（"+((Date.now()-t0)/1000).toFixed(1)+" 秒）";
+  return text;
+}
+
+/* ── 模式切換 ─────────────────────────────────────────────── */
+function mode(m){
+  const f = m==="file";
+  $("#m-file").classList.toggle("on", f);
+  $("#m-rec").classList.toggle("on", !f);
+  $("#pane-file").classList.toggle("hidden", !f);
+  $("#pane-rec").classList.toggle("hidden", f);
+  if(!f) initRec();
+}
+$("#m-file").onclick = ()=>mode("file");
+$("#m-rec").onclick  = ()=>mode("rec");
+
+/* ── 上傳模式：拖放 / 選檔 ──────────────────────────────────── */
 const drop = $("#drop"), fileEl = $("#file");
 drop.onclick = () => fileEl.click();
 fileEl.onchange = e => setFile(e.target.files[0]);
@@ -430,39 +594,118 @@ function setFile(f){ picked=f; $("#fname").textContent=f?f.name:""; $("#go").dis
 
 $("#go").onclick = async () => {
   if(!picked) return;
-  const fd = new FormData();
-  fd.append("file", picked);
-  fd.append("language", $("#lang").value);
-  fd.append("response_format", $("#fmt").value);
-  fd.append("align", $("#align").checked ? "1":"0");
-  fd.append("diarize", $("#diar").checked ? "1":"0");
-  $("#go").disabled=true; $("#status").textContent="轉錄中…（長音檔需要一些時間）";
-  const t0=Date.now();
+  $("#go").disabled=true;
   try{
-    const r = await fetch("/v1/audio/transcriptions?k="+encodeURIComponent(KEY),
-                          {method:"POST", body:fd,
-                           headers: KEY ? {"Authorization":"Bearer "+KEY} : {}});
-    const ctype = r.headers.get("Content-Type")||"";
-    let text;
-    if(ctype.includes("application/json")){
-      const j = await r.json();
-      if(j.error){ throw new Error(j.error.message||"server error"); }
-      text = j.segments ? JSON.stringify(j, null, 2) : (j.text||"");
-    } else { text = await r.text(); }
-    $("#out").textContent = text || "（無內容）";
-    $("#status").textContent = "完成，耗時 "+((Date.now()-t0)/1000).toFixed(1)+" 秒";
-  }catch(err){
-    $("#out").textContent=""; $("#status").textContent="❌ "+err.message;
-  }finally{ $("#go").disabled=false; }
+    lastName = picked.name.replace(/\\.[^.]+$/,"") || "transcript";
+    await upload(picked, picked.name, $("#status"), false);
+  }catch(err){ $("#status").textContent = "\\u274c "+err.message; }
+  finally{ $("#go").disabled=false; }
 };
+
+/* ── 結果工具 ─────────────────────────────────────────────── */
 $("#copy").onclick = () => navigator.clipboard.writeText($("#out").textContent);
+$("#clear").onclick = () => { const o=$("#out"); o.textContent="（結果會顯示在這裡）"; o.dataset.has=""; };
 $("#dl").onclick = () => {
-  const blob = new Blob([$("#out").textContent], {type:"text/plain"});
+  const ext = fmt()==="srt" ? ".srt" : ".txt";
+  const blob = new Blob([$("#out").textContent], {type:"text/plain;charset=utf-8"});
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = (picked? picked.name.replace(/\\.[^.]+$/,""):"transcript")+".srt";
-  a.click();
+  a.href = URL.createObjectURL(blob); a.download = lastName + ext; a.click();
 };
+
+/* ── 錄音模式：MediaRecorder + 停頓偵測（VAD）──────────────── */
+let recInited=false, stream=null, recorder=null, chunks=[],
+    audioCtx=null, analyser=null, rafId=0,
+    sessionOn=false, speechStarted=false, silentSince=0, segStart=0;
+// SILENCE_MS 拉長到 2.2s：自然講話的句中停頓（思考/換氣，常 1～2s）不會被切碎；
+// 真正的「說完」通常停更久，或直接按麥克風結束。降低雙重 VAD 對「暫停」認知的落差。
+const SILENCE_MS = 2200, MIN_SEG_MS = 500, MAX_SEG_MS = 20000, VAD_THRESH = 0.014;
+
+function recSupported(){
+  return window.isSecureContext && navigator.mediaDevices &&
+         navigator.mediaDevices.getUserMedia && window.MediaRecorder;
+}
+function initRec(){
+  if(recInited) return; recInited = true;
+  if(!recSupported()){
+    $("#mic").disabled = true;
+    const w = $("#rec-warn"); w.classList.remove("hidden");
+    w.innerHTML = window.isSecureContext
+      ? "此瀏覽器不支援錄音 API。"
+      : "&#128274; 即時錄音需在 <b>HTTPS</b> 或 localhost 開啟。<br>請改用「端點」分頁的<b>對外臨時網址 / QR</b>（自帶 https）連線。";
+    $("#rec-status").textContent = "目前連線無法使用麥克風。";
+  }
+}
+$("#mic").onclick = () => { sessionOn ? stopSession(true) : startSession(); };
+
+async function startSession(){
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}});
+  }catch(err){ $("#rec-status").textContent = "\\u274c 無法取得麥克風：" + err.message; return; }
+  audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+  const src = audioCtx.createMediaStreamSource(stream);
+  analyser = audioCtx.createAnalyser(); analyser.fftSize = 1024;
+  src.connect(analyser);
+  sessionOn = true;
+  $("#mic").classList.add("rec"); $("#mic").innerHTML = "&#9209;";
+  $("#rec-status").textContent = "聆聽中…說完停頓約 2 秒自動上傳（句中短停不中斷），再按麥克風結束。";
+  startSegment(); monitor();
+}
+function startSegment(){
+  chunks = []; speechStarted = false; silentSince = 0; segStart = Date.now();
+  let mime = ["audio/webm;codecs=opus","audio/webm","audio/mp4"].find(
+      m => MediaRecorder.isTypeSupported(m)) || "";
+  recorder = mime ? new MediaRecorder(stream,{mimeType:mime}) : new MediaRecorder(stream);
+  recorder.ondataavailable = e => { if(e.data && e.data.size) chunks.push(e.data); };
+  recorder.onstop = onSegStop;
+  recorder.start();
+}
+function cutSegment(){ if(recorder && recorder.state==="recording") recorder.stop(); }
+
+async function onSegStop(){
+  const dur = Date.now() - segStart;
+  const blob = new Blob(chunks, {type: chunks[0] ? chunks[0].type : "audio/webm"});
+  const shouldUpload = speechStarted && dur >= MIN_SEG_MS && blob.size > 1200;
+  // 先立刻接著錄下一段，避免上傳（可能數秒）期間漏掉使用者繼續說的話
+  if(sessionOn) startSegment();
+  else teardown();
+  // 再背景上傳前一段（不阻塞錄音）；副檔名一律 .webm → 伺服器走 ffmpeg 抽軌
+  if(shouldUpload){
+    try{ await upload(blob, "recording.webm", $("#rec-status"), true); }
+    catch(err){ $("#rec-status").textContent = "\\u274c " + err.message; }
+  }
+}
+function monitor(){
+  const buf = new Uint8Array(analyser.fftSize);
+  const tick = () => {
+    if(!sessionOn){ return; }
+    analyser.getByteTimeDomainData(buf);
+    let sum=0; for(let i=0;i<buf.length;i++){ const v=(buf[i]-128)/128; sum+=v*v; }
+    const rms = Math.sqrt(sum/buf.length);
+    $("#lvl").style.width = Math.min(100, rms*420) + "%";
+    const now = Date.now();
+    if(rms >= VAD_THRESH){ speechStarted = true; silentSince = 0; }
+    else if(speechStarted){
+      if(!silentSince) silentSince = now;
+      else if(now - silentSince >= SILENCE_MS){ cutSegment(); }  // 停頓 → 切段上傳
+    }
+    if(Date.now() - segStart >= MAX_SEG_MS && speechStarted){ cutSegment(); } // 上限強制切
+    rafId = requestAnimationFrame(tick);
+  };
+  rafId = requestAnimationFrame(tick);
+}
+function stopSession(){
+  sessionOn = false;
+  $("#mic").classList.remove("rec"); $("#mic").innerHTML = "&#127908;";
+  $("#rec-status").textContent = "已停止。";
+  if(rafId) cancelAnimationFrame(rafId);
+  $("#lvl").style.width = "0%";
+  cutSegment();   // 收尾段（onSegStop 會上傳並 teardown）
+}
+function teardown(){
+  try{ if(stream) stream.getTracks().forEach(t=>t.stop()); }catch(e){}
+  try{ if(audioCtx) audioCtx.close(); }catch(e){}
+  stream = null; audioCtx = null; analyser = null; recorder = null;
+}
 </script>
 </body>
 </html>"""

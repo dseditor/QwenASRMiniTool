@@ -100,7 +100,7 @@ REM Chinese Windows (cp950 default encoding).
     --hidden-import opencc ^
     --hidden-import customtkinter ^
     --hidden-import sounddevice ^
-    --hidden-import librosa ^
+    --hidden-import soxr ^
     --hidden-import soundfile ^
     --hidden-import kaldi_native_fbank ^
     --hidden-import scipy ^
@@ -121,6 +121,8 @@ REM Chinese Windows (cp950 default encoding).
     --add-data "%SRC%\ffmpeg_utils.py;." ^
     --add-data "%SRC%\subtitle_editor.py;." ^
     --add-data "%SRC%\setting.py;." ^
+    --add-data "%SRC%\model_tab.py;." ^
+    --add-data "%SRC%\audio_io.py;." ^
     --add-data "%SRC%\version.py;." ^
     --add-data "%SRC%\updater.py;." ^
     --add-data "%SRC%\fa_aligner.py;." ^
@@ -176,7 +178,7 @@ REM app root tidy. Only start-gpu.bat is exposed at the root; it sets
 REM SCRIPT_DIR=%~dp0cudagpu\ so GPUModel\, ov_models\, venv-gpu\ and
 REM app-gpu.py all resolve inside cudagpu\.
 IF NOT EXIST "%SRC%\dist2\QwenASR\cudagpu\" mkdir "%SRC%\dist2\QwenASR\cudagpu\"
-FOR %%F IN (app-gpu.py streamlit_vulkan.py streamlit_app.py subtitle_editor.py batch_tab.py diarize.py ffmpeg_utils.py chatllm_engine.py fa_aligner.py api_server.py endpoint_tab.py processor_numpy.py downloader.py generate_srt.py version.py updater.py setting.py requirements-gpu.txt) DO IF EXIST "%SRC%\%%F" xcopy "%SRC%\%%F" "%SRC%\dist2\QwenASR\cudagpu\" /Y /Q >nul
+FOR %%F IN (app-gpu.py subtitle_editor.py batch_tab.py diarize.py ffmpeg_utils.py chatllm_engine.py fa_aligner.py api_server.py endpoint_tab.py processor_numpy.py downloader.py generate_srt.py version.py updater.py setting.py model_tab.py audio_io.py requirements-gpu.txt) DO IF EXIST "%SRC%\%%F" xcopy "%SRC%\%%F" "%SRC%\dist2\QwenASR\cudagpu\" /Y /Q >nul
 IF EXIST "%SRC%\prompt_template.json" xcopy "%SRC%\prompt_template.json" "%SRC%\dist2\QwenASR\cudagpu\" /Y /Q >nul
 REM Only the launcher is exposed at the package root.
 IF EXIST "%SRC%\start-gpu.bat" xcopy "%SRC%\start-gpu.bat" "%SRC%\dist2\QwenASR\" /Y /Q >nul

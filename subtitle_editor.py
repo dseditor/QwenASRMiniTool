@@ -1096,23 +1096,13 @@ class SubtitleEditorWindow(ctk.CTkToplevel):
     def _load_audio(self):
         """背景執行緒載入音訊（soundfile 優先，librosa 備用）。"""
         try:
-            import soundfile as sf
-            data, sr = sf.read(str(self.audio_path), always_2d=False, dtype="float32")
-            if data.ndim > 1:
-                data = data.mean(axis=1)
-            if sr != 16000:
-                import librosa
-                data = librosa.resample(data, orig_sr=sr, target_sr=16000)
+            # audio_io：soundfile + soxr 重採樣 + ffmpeg 後援（不依賴 librosa/numba）
+            from audio_io import load_audio_16k_mono
+            data, _ = load_audio_16k_mono(self.audio_path, 16000)
             self._audio_data = data
             self._audio_sr   = 16000
         except Exception:
-            try:
-                import librosa
-                data, _ = librosa.load(str(self.audio_path), sr=16000, mono=True)
-                self._audio_data = data
-                self._audio_sr   = 16000
-            except Exception:
-                self._audio_data = None
+            self._audio_data = None
 
     # ── 底部操作列 ───────────────────────────────────────────────────
 

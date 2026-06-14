@@ -62,6 +62,36 @@ _HF_BASE  = _HF_BASE_PRIMARY   # 相容舊版引用
 _VAD_URL  = "https://github.com/snakers4/silero-vad/raw/v4.0/files/silero_vad.onnx"
 _UA       = "Mozilla/5.0 (compatible; QwenASR-downloader)"
 
+# ── HuggingFace 鏡像站 ─────────────────────────────────────────────────
+# 中國大陸等地直連 huggingface.co 常逾時；可改走鏡像（如 hf-mirror.com）。
+# set_mirror() 設定後，_download_file() 會把所有 huggingface.co 的網址
+# 改寫到鏡像網域；空字串代表使用官方來源（預設）。
+HF_OFFICIAL = "https://huggingface.co"
+_MIRROR_BASE: str = ""   # 例："https://hf-mirror.com"
+
+
+def set_mirror(base: str | None):
+    """設定 HuggingFace 鏡像站台基底網址（如 'https://hf-mirror.com'）。
+
+    傳入空字串或 None 表示恢復使用官方 huggingface.co。
+    僅改寫 huggingface.co 來源；GitHub 等其他網域不受影響。
+    """
+    global _MIRROR_BASE
+    base = (base or "").strip().rstrip("/")
+    _MIRROR_BASE = base
+
+
+def get_mirror() -> str:
+    """回傳目前生效的鏡像基底網址（空字串＝官方）。"""
+    return _MIRROR_BASE
+
+
+def _apply_mirror(url: str) -> str:
+    """若已設定鏡像且 url 指向 huggingface.co，改寫為鏡像網域。"""
+    if _MIRROR_BASE and url.startswith(HF_OFFICIAL):
+        return _MIRROR_BASE + url[len(HF_OFFICIAL):]
+    return url
+
 # ── 1.7B INT8 KV-cache 模型倉庫 ───────────────────────────────────────
 _HF_1P7B_REPO = "dseditor/Qwen3-ASR-1.7B-INT8_OpenVINO"
 _HF_1P7B_BASE = f"https://huggingface.co/{_HF_1P7B_REPO}/resolve/main"
@@ -352,6 +382,7 @@ def _download_file(url: str, dest: Path, progress_cb=None):
     dest.parent.mkdir(parents=True, exist_ok=True)
     existing = dest.stat().st_size if dest.exists() else 0
 
+    url = _apply_mirror(url)   # 套用鏡像站改寫（若有設定）
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
     if existing > 0:
         req.add_header("Range", f"bytes={existing}-")

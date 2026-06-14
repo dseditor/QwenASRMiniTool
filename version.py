@@ -10,10 +10,12 @@
 """
 from __future__ import annotations
 
-# 本次編譯版本（dist2）。1.0.7：FA 統一(OpenVINO/chatllm 共用)、孤兒字修正、
-# 錄製轉換改名、說話者分離預設開啟、ffmpeg 自動偵測、OpenAI 相容端點+端點分頁
-# (QR/cloudflared 對外網址)。最新已發佈 Release 為 1.0.5。
-__version__ = "1.0.7"
+# 本次編譯版本（dist2）。1.0.8：模型分頁重構(引擎/裝置/模型/路徑/下載/CPU 集中)、
+# 語系移至設定頁並置頂、標題列狀態摘要、Streamlit 退役(網頁服務統一由端點提供)、
+# 端點網頁重設計+即時錄音(停頓自動上傳)、端點 QR 右側面板/外網優先/可下載、
+# audio_io 取代 librosa(修 numpy 2.4 + numba 衝突，瘦身)、句尾字消失修復
+# (去整秒裁切 + 尾段 0.35s + 瀏覽器停頓門檻 2.2s)。最新已發佈 Release 為 1.0.7。
+__version__ = "1.0.8"
 
 # 自動更新來源：GitHub repo（owner/name）
 GITHUB_REPO = "dseditor/QwenASRMiniTool"

@@ -114,19 +114,16 @@ start-gpu.bat
 
 ---
 
-### Streamlit 前端（0222 更新，僅 GPU 服務版本）
+### 網頁服務（端點分頁）
 
-![Streamlit 前端介面](Readme/readme08.jpg)
+內網／網頁轉錄改由內建的「**端點**」分頁提供，取代先前的 Streamlit 前端。端點服務的優勢：
 
-提供標準 Streamlit 前端，現在可於 GPU 版本啟動時選擇 Streamlit 前端，方便在內網中搭建服務使用，目前預設是使用此前端，選擇 2 可以切換為原來的 Tkinter 前端。
-如果只想使用 Tkinter 前端，可以直接執行 `app-gpu.py`。
+- **OpenAI 相容 API**：`POST /v1/audio/transcriptions`，可被腳本、OpenWebUI 等串接。
+- **內建上傳網頁**：開啟根路徑即可上傳音訊／影片，支援語系、輸出格式（SRT）、時間軸對齊、說話者分離。
+- **共用同一顆引擎**：不重複載入模型，記憶體占用減半；切換後端重載後自動跟著換。
+- **零第三方依賴**：純標準庫，已內建於 EXE。
 
-![啟動選擇畫面](Readme/readme09.jpg)
-
-Streamlit 前端可從網路端點（例如手機上）使用麥克風，採取按壓錄音方式進行錄製，傳輸到本地端辨識後再停止錄製。
-若在外網需要使用，可利用 CloudFlare Tunnel 或 Ngrok 通道，但須自行注意端口保護。
-
-![手機麥克風使用](Readme/readme10.jpg)
+若在外網需要使用，可利用 CloudFlare Tunnel 或 Ngrok 通道，但須自行注意端口保護與 API 金鑰。
 
 ---
 

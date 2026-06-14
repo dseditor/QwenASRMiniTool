@@ -11,9 +11,8 @@ REM   LAYOUT: this launcher stays at the package root; all GPU
 REM   scripts, models and the venv live under cudagpu\ . Only
 REM   start-gpu.bat is exposed at the root, keeping it tidy.
 REM
-REM   Step 3 offers two interfaces:
-REM     [1] CustomTkinter desktop app  (app-gpu.py)
-REM     [2] Streamlit web UI           (streamlit_vulkan.py)
+REM   Step 3 launches the CustomTkinter desktop app (app-gpu.py).
+REM   For a web interface, use the built-in Endpoint tab instead.
 REM ============================================================
 
 REM All GPU resources live under cudagpu\ (scripts, models, venv).
@@ -29,7 +28,6 @@ set "ALIGNER_DIR=%GPU_MODEL_DIR%\Qwen3-ForcedAligner-0.6B"
 set "OV_DIR=%SCRIPT_DIR%ov_models"
 set "VENV_DIR=%SCRIPT_DIR%venv-gpu"
 set "APP_SCRIPT=%SCRIPT_DIR%app-gpu.py"
-set "SL_SCRIPT=%SCRIPT_DIR%streamlit_vulkan.py"
 set "PYTHON_EXE=python"
 
 REM ---- Clean up leftover temp files from previous runs -------
@@ -246,55 +244,16 @@ echo.
 REM ---- GPU check ---------------------------------------------
 "%PYTHON_EXE%" -c "import torch; avail=torch.cuda.is_available(); print('[OK] CUDA: '+torch.cuda.get_device_name(0)) if avail else print('[WARN] CUDA not available - will run in CPU mode')"
 
-REM ---- Step 3/3: Launch interface ----------------------------
+REM ---- Step 3/3: Launch desktop app --------------------------
 echo.
-echo  Step 3/3: Launch Interface
+echo  Step 3/3: Launch Desktop App
 echo  --------------------------------------------------------
-echo   [1] Desktop App  - CustomTkinter GUI  (app-gpu.py)
-echo   [2] Web UI       - Streamlit Browser  (streamlit_vulkan.py, http://localhost:8501)
-echo.
-set /p LAUNCH_CHOICE=" Select [1/2, default=1]: "
-if "!LAUNCH_CHOICE!"=="" set LAUNCH_CHOICE=1
-
-if "!LAUNCH_CHOICE!"=="2" goto :launch_streamlit
-
-REM ---- Launch CustomTkinter desktop app ----------------------
-:launch_ctk
-echo.
 echo  [>>] Starting desktop app (app-gpu.py)...
 echo.
 "%PYTHON_EXE%" "%APP_SCRIPT%"
 if errorlevel 1 (
     echo.
     echo  [!] App exited with error. See message above.
-    pause
-)
-goto :done
-
-REM ---- Launch Streamlit web UI --------------------------------
-:launch_streamlit
-echo.
-if not exist "%SL_SCRIPT%" (
-    echo  [ERROR] streamlit_vulkan.py not found: %SL_SCRIPT%
-    pause & exit /b 1
-)
-"%PYTHON_EXE%" -c "import streamlit" > nul 2>&1
-if errorlevel 1 (
-    echo  [WARN] streamlit not installed. Installing now...
-    "%PYTHON_EXE%" -m pip install streamlit --quiet
-    if errorlevel 1 (
-        echo  [ERROR] Failed to install streamlit.
-        pause & exit /b 1
-    )
-)
-echo  [>>] Starting Streamlit web UI...
-echo       Open browser at: http://localhost:8501
-echo       Press Ctrl+C to stop.
-echo.
-"%PYTHON_EXE%" -m streamlit run "%SL_SCRIPT%" --server.port 8501 --server.headless false --browser.gatherUsageStats false
-if errorlevel 1 (
-    echo.
-    echo  [!] Streamlit exited with error. See message above.
     pause
 )
 goto :done

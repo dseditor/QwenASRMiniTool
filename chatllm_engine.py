@@ -25,8 +25,16 @@ from pathlib import Path
 import numpy as np
 
 # ── 輸出語系旗標（由 app.py / app-gpu.py 切換時同步設定）──────────────
-# True = 直接輸出模型原始簡體；False = 經 OpenCC s2twp 轉為繁體
+# True = 直接輸出模型原始簡體；False = 經 OpenCC 轉為繁體
 _output_simplified: bool = False
+
+# 繁體輸出時是否啟用「簡繁詞彙轉換」：
+#   True  → OpenCC "s2twp"（含台灣慣用詞）；False → "s2t"（僅字形）
+_vocab_convert: bool = True
+
+
+def _opencc_config() -> str:
+    return "s2twp" if _vocab_convert else "s2t"
 
 # ── 共用常數（與 app.py 保持同步）─────────────────────────────────────
 SAMPLE_RATE   = 16000
@@ -520,12 +528,14 @@ def _detect_speech_groups(audio: np.ndarray, vad_sess, max_group_sec: int = MAX_
     groups.append((gs, ge))
 
     result = []
+    _tail = int(0.35 * SAMPLE_RATE)   # 多含尾段 0.35s：補捉 Silero 漏掉的句尾輕聲字（的/了/嗎）
     for gs, ge in groups:
-        ns = max(1, int((ge - gs) // SAMPLE_RATE))
-        ch = audio[gs: gs + ns * SAMPLE_RATE].astype(np.float32)
-        if len(ch) < SAMPLE_RATE:
+        # 取完整語音段並多含一點尾巴（mel 會補零到固定長度）；舊版 floor 會丟尾段
+        # 近 1 秒，句尾輕聲字也常被 Silero 的 ge 排除，故補 0.35s 尾段。
+        ch = audio[gs: min(len(audio), ge + _tail)].astype(np.float32)
+        if len(ch) < SAMPLE_RATE // 2:      # 最小 0.5 秒
             continue
-        result.append((gs / SAMPLE_RATE, gs / SAMPLE_RATE + ns, ch))
+        result.append((gs / SAMPLE_RATE, ge / SAMPLE_RATE, ch))
     return result
 
 
@@ -662,7 +672,7 @@ class ChatLLMASREngine:
         # ── OpenCC 簡→繁轉換 ──────────────────────────────────────
         try:
             import opencc
-            self.cc = opencc.OpenCC("s2twp")
+            self.cc = opencc.OpenCC(_opencc_config())
         except Exception:
             self.cc = None
 
@@ -707,6 +717,14 @@ class ChatLLMASREngine:
         self._load_aligner(cb=cb)
 
     # ── 單段轉錄 ──────────────────────────────────────────────────────
+
+    def rebuild_cc(self):
+        """依目前的詞彙轉換旗標重建 OpenCC 轉換器（免重新載入模型）。"""
+        try:
+            import opencc
+            self.cc = opencc.OpenCC(_opencc_config())
+        except Exception:
+            pass
 
     def transcribe(
         self,
@@ -823,9 +841,9 @@ class ChatLLMASREngine:
         n_speakers: int | None = None,
         original_path: Path | None = None,
     ) -> Path | None:
-        import librosa
+        from audio_io import load_audio_16k_mono
 
-        audio, _ = librosa.load(str(audio_path), sr=SAMPLE_RATE, mono=True)
+        audio, _ = load_audio_16k_mono(audio_path, SAMPLE_RATE)
 
         # ── 分段策略：說話者分離 vs 傳統 VAD（與 ASREngine 一致）────
         use_diar = diarize and self.diar_engine is not None and self.diar_engine.ready

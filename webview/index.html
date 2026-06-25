@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>聲音辨識</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Noto+Sans+TC:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<div class="app">
+
+  <!-- ════════════ 側欄 ════════════ -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo" title="聲音辨識">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="9" y="2" width="6" height="12" rx="3"></rect>
+          <path d="M5 10a7 7 0 0 0 14 0"></path>
+          <line x1="12" y1="19" x2="12" y2="22"></line>
+        </svg>
+      </div>
+      <div class="name">聲音辨識</div>
+    </div>
+
+    <nav class="nav" id="nav">
+      <button class="nav-item active" data-view="file">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 14h6M9 18h4"/></svg>
+        <span class="lbl">音檔</span>
+      </button>
+      <button class="nav-item" data-view="batch">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="4" rx="1"/><rect x="3" y="10" width="18" height="4" rx="1"/><rect x="3" y="16" width="18" height="4" rx="1"/></svg>
+        <span class="lbl">批次</span>
+      </button>
+      <button class="nav-item" data-view="record">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+        <span class="lbl">錄製</span>
+      </button>
+      <button class="nav-item" data-view="endpoint">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6"/><path d="M7 8h10v3a5 5 0 0 1-10 0z"/><path d="M12 16v6"/></svg>
+        <span class="lbl">端點</span>
+      </button>
+      <button class="nav-item" data-view="model">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg>
+        <span class="lbl">模型</span>
+      </button>
+      <button class="nav-item" data-view="settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        <span class="lbl">設定</span>
+      </button>
+    </nav>
+
+    <div class="side-foot">
+      <div class="status-dot" id="model-status">
+        <span class="dot"></span><span class="t">模型已就緒</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ════════════ 主區 ════════════ -->
+  <div class="main">
+    <header class="topbar">
+      <h1 id="view-title">音檔轉字幕</h1>
+      <div class="ctx" id="view-ctx"></div>
+    </header>
+
+    <div class="view-host">
+
+      <!-- ───── 音檔轉字幕 ───── -->
+      <section class="view active" data-view="file">
+        <div class="drop" id="drop">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg></div>
+          <div class="big">拖曳音訊到此，或<b>點擊選擇檔案</b></div>
+          <div class="sub">支援 mp3 / wav / m4a / 影片音軌</div>
+        </div>
+
+        <div class="controls">
+          <button class="btn btn-primary" id="btn-run" disabled>
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>開始轉換
+          </button>
+          <button class="btn btn-ghost" id="btn-open-dir" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>開啟輸出資料夾
+          </button>
+          <button class="btn btn-ghost" id="btn-verify" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>字幕驗證
+          </button>
+          <div class="sp"></div>
+          <label class="switch"><input type="checkbox" id="sw-diar" checked><span class="track"></span>說話者分離</label>
+          <select class="select" id="sel-spk" title="人數">
+            <option value="auto">人數 自動</option>
+            <option>2</option><option>3</option><option>4</option><option>5</option><option>6</option>
+          </select>
+          <label class="switch"><input type="checkbox" id="sw-align" checked><span class="track"></span>時間軸對齊</label>
+        </div>
+
+        <div class="hint-head">
+          <div class="l"><span class="t">辨識提示（可選）</span><span class="d">貼入歌詞、關鍵字或背景說明，可提升辨識準確度</span></div>
+          <button class="btn btn-ghost btn-sm" id="btn-load-txt">讀入 TXT…</button>
+        </div>
+        <textarea class="input" id="hint-box" placeholder="例如：本段為產品行銷 Podcast，會出現「轉換率」「漏斗」等行銷術語…"></textarea>
+
+        <div class="progress" id="progress" hidden>
+          <div class="meta"><span class="s" id="prog-status">辨識中 · 第 5/8 段</span><span class="p" id="prog-pct">68%</span></div>
+          <div class="bar"><i id="prog-bar" style="width:68%"></i></div>
+        </div>
+
+        <!-- Signature：波形 + 字幕卡 -->
+        <div class="result" id="result" hidden>
+          <div class="sec-title">辨識結果</div>
+          <div class="wave-panel">
+            <div class="wave" id="wave"><div class="playhead" id="playhead" style="left:42%"></div></div>
+            <div class="wave-time"><span>00:00</span><span id="wave-dur">01:16</span></div>
+          </div>
+          <div class="subs" id="subs"></div>
+        </div>
+
+        <div class="log" id="file-log" hidden></div>
+      </section>
+
+      <!-- ───── 批次辨識 ───── -->
+      <section class="view" data-view="batch">
+        <div class="batch-head">
+          <button class="btn btn-ghost" id="btn-batch-add"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>加入檔案</button>
+          <button class="btn btn-primary" id="btn-batch-run"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>全部開始</button>
+          <div class="sp"></div>
+          <div class="summary" id="batch-summary">3 / 7 完成</div>
+        </div>
+        <div class="batch-list" id="batch-list"></div>
+      </section>
+
+      <!-- ───── 錄製轉換 ───── -->
+      <section class="view" data-view="record">
+        <div class="card">
+          <div class="rec-stage">
+            <button class="rec-btn" id="rec-btn" aria-label="開始錄音">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+            </button>
+            <div class="rec-timer" id="rec-timer">00:00</div>
+            <div class="rec-live-wave" id="rec-live-wave" hidden></div>
+            <div class="rec-note">錄製轉換：偵測到說話停頓時才辨識，句中短暫停頓不會中斷。按麥克風開始，再按一次結束並完成最後一段。</div>
+          </div>
+        </div>
+        <div class="hint-head"><div class="l"><span class="t">即時字幕</span></div></div>
+        <div class="subs" id="rec-subs"><div class="sub-card"><span class="tc">— · —</span><div class="body"><div class="txt" style="color:var(--muted)">開始錄音後，辨識結果會逐段出現在這裡。</div></div></div></div>
+      </section>
+
+      <!-- ───── 端點 ───── -->
+      <section class="view" data-view="endpoint">
+        <div class="card">
+          <div class="row">
+            <div class="label"><div class="t">OpenAI 相容轉錄服務</div><div class="d">讓手機或其他程式透過區網上傳音檔辨識</div></div>
+            <span class="chip chip-ok" id="ep-state"><span style="font-size:9px">●</span> 執行中</span>
+            <label class="switch"><input type="checkbox" id="sw-endpoint" checked><span class="track"></span>啟動服務</label>
+          </div>
+        </div>
+
+        <div class="sec-title">連線資訊</div>
+        <div class="ep-grid">
+          <div class="card">
+            <div class="d" style="font-size:12px;color:var(--muted);margin-bottom:7px">上傳網頁（手機掃 QR 或開啟）</div>
+            <div class="copy-field"><code id="ep-url">http://192.168.1.20:11435/?k=•••••</code><button class="btn btn-ghost btn-sm" data-copy="#ep-url">複製</button></div>
+          </div>
+          <div class="card">
+            <div class="d" style="font-size:12px;color:var(--muted);margin-bottom:7px">存取金鑰（等同密碼）</div>
+            <div class="copy-field"><code id="ep-key">••••••••••••</code><button class="btn btn-ghost btn-sm" id="btn-reveal-key">顯示</button><button class="btn btn-ghost btn-sm" id="btn-newkey">重設</button></div>
+          </div>
+        </div>
+
+        <div class="sec-title">設定</div>
+        <div class="card">
+          <div class="row"><div class="label"><div class="t">監聽埠</div></div><input class="input mono" id="ep-port" value="11435" style="width:110px"></div>
+          <div class="row"><div class="label"><div class="t">端點路徑</div><div class="d">OpenAI Whisper 相容，可直接替換 base URL 使用</div></div></div>
+          <div class="endpoint-line"><span class="verb">POST</span> /v1/audio/transcriptions</div>
+        </div>
+      </section>
+
+      <!-- ───── 模型 ───── -->
+      <section class="view" data-view="model">
+        <div class="sec-title">推理核心</div>
+        <div class="radio-cards" id="backend-cards">
+          <label class="radio-card sel"><span class="rd"></span><div class="info"><div class="t">CPU · OpenVINO INT8</div><div class="d">相容性最佳，任何電腦都能跑，不需顯卡</div></div></label>
+          <label class="radio-card"><span class="rd"></span><div class="info"><div class="t">GPU · chatllm Vulkan</div><div class="d">最快，需相容顯卡（部分 AMD 顯卡可能不穩）</div></div></label>
+          <label class="radio-card"><span class="rd"></span><div class="info"><div class="t">GPU · Whisper / Breeze-ASR</div><div class="d">繁體中文／台語特化，Vulkan 加速</div></div></label>
+        </div>
+
+        <div class="sec-title">偵測到的裝置</div>
+        <div class="dev-list" id="dev-list">
+          <div class="dev"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg></span><span class="nm">CPU · AMD Ryzen 5 9600X 6-Core</span><span class="vram">使用中</span></div>
+          <div class="dev"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 18v2M18 18v2"/></svg></span><span class="nm">GPU · NVIDIA GeForce RTX 4070</span><span class="vram">8.0 GB 可用</span></div>
+        </div>
+
+        <div class="sec-title">診斷</div>
+        <div class="banner banner-warn" id="gpu-diag">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          <div>GPU 偵測未完成：<code style="font-family:var(--font-mono)">main.exe --show_devices</code> 逾時。已自動改用 CPU 推理；如需 GPU，請更新顯卡 / Vulkan 驅動後重試。</div>
+        </div>
+      </section>
+
+      <!-- ───── 設定 ───── -->
+      <section class="view settings" data-view="settings">
+        <div class="card">
+          <div class="row"><div class="label"><div class="t">介面縮放</div><div class="d">調整文字與控制項大小</div></div>
+            <input type="range" class="slider" id="set-scale" min="80" max="150" step="5" value="100"><span class="slider-val" id="set-scale-val">100%</span></div>
+          <div class="row"><div class="label"><div class="t">輸出格式</div><div class="d">全域預設，影響單檔／批次／端點</div></div>
+            <div class="seg" id="set-format"><button class="on" data-v="srt">SRT 字幕</button><button data-v="txt">純文字</button></div></div>
+          <div class="row"><div class="label"><div class="t">簡繁詞彙轉換</div><div class="d">把模型輸出轉成在地用語</div></div>
+            <div class="seg" id="set-vocab"><button data-v="off">關閉</button><button class="on" data-v="s2twp">台灣用語</button><button data-v="s2t">標準</button></div></div>
+          <div class="row"><div class="label"><div class="t">HuggingFace 鏡像站</div><div class="d">下載模型較慢時可改用鏡像</div></div>
+            <input class="input mono" id="set-mirror" placeholder="hf-mirror.com" style="width:200px"></div>
+          <div class="row"><div class="label"><div class="t">FFmpeg 路徑</div><div class="d">處理影片音軌所需</div></div>
+            <div class="with-browse"><input class="input mono" id="set-ffmpeg" value="ffmpeg/ffmpeg.exe"><button class="btn btn-ghost btn-sm">瀏覽</button><span class="chip chip-ok">已偵測</span></div></div>
+          <div class="row"><div class="label"><div class="t">外觀主題</div></div>
+            <div class="seg" id="set-theme"><button class="on" data-v="light">淺色</button><button data-v="dark">深色</button><button data-v="system">跟隨系統</button></div></div>
+          <div class="row"><div class="label"><div class="t">介面語言</div></div>
+            <select class="select" id="set-lang"><option>繁體中文</option><option>English</option></select></div>
+        </div>
+        <div class="card" style="margin-top:14px;display:flex;align-items:center;gap:12px">
+          <div class="label"><div class="t" style="font-size:13px">聲音辨識 <span class="chip chip-muted" id="app-version">v—</span></div><div class="d">本地推理 · 資料不離開你的電腦</div></div>
+          <div class="sp" style="flex:1"></div>
+          <button class="btn btn-ghost btn-sm" id="btn-check-update">檢查更新</button>
+        </div>
+      </section>
+
+    </div>
+  </div>
+</div>
+
+<input id="hidden-file" type="file" accept="audio/*,video/*" style="display:none">
+<script src="js/bridge.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

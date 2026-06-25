@@ -3,6 +3,8 @@
 
 # GUI
 customtkinter>=5.2.0
+# WebView 版介面（桌面殼，與端點/EXE 共用同一前端 webview/）
+pywebview>=6.0
 
 # 推理引擎
 openvino>=2024.0.0

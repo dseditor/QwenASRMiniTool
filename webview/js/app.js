@@ -369,23 +369,111 @@
   }
   function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 
-  // ── 錄製（展示用動效；實機錄音由桌面/端點各自處理）──────
-  let recOn = false, recSec = 0, recTimer = null, waveTimer = null;
-  $("#rec-btn").addEventListener("click", () => recOn ? stopRec() : startRec());
-  function startRec() {
-    recOn = true; recSec = 0;
+  // ── 錄製轉換：MediaRecorder + 停頓偵測(VAD)，分段上傳辨識 ──────
+  //   127.0.0.1/localhost 屬安全情境，getUserMedia 可用（不需 HTTPS）。
+  //   說完停頓 → 切段 → 上傳 /api/transcribe → 逐段附加即時字幕。
+  const REC = {
+    on: false, sec: 0, timer: null, raf: 0, firstResult: true,
+    stream: null, ctx: null, analyser: null, recorder: null, chunks: [],
+    speech: false, silentSince: 0, segStart: 0,
+  };
+  const SILENCE_MS = 2200, MIN_SEG_MS = 500, MAX_SEG_MS = 20000, VAD_THRESH = 0.014;
+
+  $("#rec-btn").addEventListener("click", () => REC.on ? stopRec() : startRec());
+
+  function recSupported() {
+    return navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder;
+  }
+  async function startRec() {
+    if (!recSupported()) { recNote("此環境不支援錄音 API。", true); return; }
+    try {
+      REC.stream = await navigator.mediaDevices.getUserMedia(
+        { audio: { echoCancellation: true, noiseSuppression: true } });
+    } catch (err) { recNote("無法取得麥克風：" + (err.message || err), true); return; }
+    REC.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = REC.ctx.createMediaStreamSource(REC.stream);
+    REC.analyser = REC.ctx.createAnalyser(); REC.analyser.fftSize = 1024;
+    src.connect(REC.analyser);
+    REC.on = true; REC.sec = 0;
     $("#rec-btn").classList.add("recording");
     const lw = $("#rec-live-wave"); lw.hidden = false;
-    lw.innerHTML = Array.from({ length: 28 }, () => `<div class="b" style="height:6px"></div>`).join("");
-    recTimer = setInterval(() => { recSec++; $("#rec-timer").textContent = fmtClock(recSec); }, 1000);
-    waveTimer = setInterval(() => {
-      $$(".b", lw).forEach(b => b.style.height = (6 + Math.random() * 30).toFixed(0) + "px");
-    }, 120);
+    lw.innerHTML = Array.from({ length: 28 }, () => `<div class="b" style="height:4px"></div>`).join("");
+    $("#rec-timer").textContent = "00:00";
+    REC.timer = setInterval(() => { REC.sec++; $("#rec-timer").textContent = fmtClock(REC.sec); }, 1000);
+    recNote("聆聽中…說完停頓約 2 秒會自動辨識；再按一次結束並完成最後一段。");
+    startSeg(); monitor();
+  }
+  function startSeg() {
+    REC.chunks = []; REC.speech = false; REC.silentSince = 0; REC.segStart = Date.now();
+    const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"]
+      .find(m => MediaRecorder.isTypeSupported(m)) || "";
+    REC.recorder = mime ? new MediaRecorder(REC.stream, { mimeType: mime })
+                        : new MediaRecorder(REC.stream);
+    REC.recorder.ondataavailable = e => { if (e.data && e.data.size) REC.chunks.push(e.data); };
+    REC.recorder.onstop = onSegStop;
+    REC.recorder.start();
+  }
+  function cutSeg() { if (REC.recorder && REC.recorder.state === "recording") REC.recorder.stop(); }
+  async function onSegStop() {
+    const dur = Date.now() - REC.segStart;
+    const blob = new Blob(REC.chunks, { type: REC.chunks[0] ? REC.chunks[0].type : "audio/webm" });
+    const ok = REC.speech && dur >= MIN_SEG_MS && blob.size > 1200;
+    if (REC.on) startSeg(); else teardownRec();    // 先續錄，避免上傳期間漏話
+    if (ok) {
+      try {
+        const file = new File([blob], "recording.webm", { type: blob.type });
+        const res = await API.transcribe({ file, diarize: false, align: false });
+        (res.segments || []).forEach(s => { if (s.text && s.text.trim()) appendRecLine(s.text.trim()); });
+      } catch (err) { recNote("辨識失敗：" + (err.message || err), true); }
+    }
+  }
+  function monitor() {
+    const buf = new Uint8Array(REC.analyser.fftSize);
+    const bars = $$(".b", $("#rec-live-wave"));
+    const tick = () => {
+      if (!REC.on) return;
+      REC.analyser.getByteTimeDomainData(buf);
+      let sum = 0; for (let i = 0; i < buf.length; i++) { const v = (buf[i] - 128) / 128; sum += v * v; }
+      const rms = Math.sqrt(sum / buf.length);
+      const base = Math.min(34, rms * 260);
+      bars.forEach(b => b.style.height = Math.max(4, base * (0.5 + Math.random() * 0.5)).toFixed(0) + "px");
+      const now = Date.now();
+      if (rms >= VAD_THRESH) { REC.speech = true; REC.silentSince = 0; }
+      else if (REC.speech) {
+        if (!REC.silentSince) REC.silentSince = now;
+        else if (now - REC.silentSince >= SILENCE_MS) cutSeg();   // 停頓 → 切段
+      }
+      if (Date.now() - REC.segStart >= MAX_SEG_MS && REC.speech) cutSeg();
+      REC.raf = requestAnimationFrame(tick);
+    };
+    REC.raf = requestAnimationFrame(tick);
   }
   function stopRec() {
-    recOn = false; $("#rec-btn").classList.remove("recording");
-    clearInterval(recTimer); clearInterval(waveTimer);
+    REC.on = false; $("#rec-btn").classList.remove("recording");
+    if (REC.raf) cancelAnimationFrame(REC.raf);
+    clearInterval(REC.timer);
     $("#rec-live-wave").hidden = true;
+    recNote("已停止。");
+    cutSeg();    // 收尾段（onSegStop 會上傳並 teardown）
+  }
+  function teardownRec() {
+    try { REC.stream && REC.stream.getTracks().forEach(t => t.stop()); } catch (e) {}
+    try { REC.ctx && REC.ctx.close(); } catch (e) {}
+    REC.stream = REC.ctx = REC.analyser = REC.recorder = null;
+  }
+  function recNote(msg, warn) {
+    const el = $(".rec-note");
+    if (el) { el.textContent = msg; el.style.color = warn ? "var(--live)" : "var(--muted)"; }
+  }
+  function appendRecLine(text) {
+    const host = $("#rec-subs");
+    if (REC.firstResult) { host.innerHTML = ""; REC.firstResult = false; }
+    const el = document.createElement("div");
+    el.className = "sub-card";
+    el.innerHTML = `<span class="tc">${fmtClock(REC.sec)}</span>
+      <div class="body"><div class="txt">${escapeHtml(text)}</div></div>`;
+    host.appendChild(el);
+    host.scrollTop = host.scrollHeight;
   }
 
   // ── 啟動 ────────────────────────────────────────────────

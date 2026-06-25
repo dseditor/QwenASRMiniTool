@@ -14,33 +14,37 @@ webview/
     └── app.js        UI 邏輯（只透過 QwenAPI，與後端解耦）
 ```
 
-## 橋接層：一份前端，三種傳輸
+## 架構：本機伺服器 + 瀏覽器渲染（同 Eel / flaskwebgui，但純標準庫）
 
-`bridge.js` 啟動時自動偵測並路由：
+不使用 pywebview（其 Windows pythonnet 後端有遞迴 bug，且 EXE 內要打包 .NET）。
+改採「本機 HTTP 伺服器 + 系統 Edge `--app` 開窗」，零第三方相依、易 PyInstaller 打包。
 
-| 偵測條件 | 模式 | 傳輸 |
+| 後端檔 | 角色 |
+|---|---|
+| `webview_backend.py` | 與視窗/傳輸無關的業務邏輯（status/settings/devices/endpoint/transcribe），重用 ASREngine |
+| `webview_server.py`  | stdlib HTTP：serve 本資料夾 + `/api/*` + SSE `/api/events`；只綁 127.0.0.1 |
+| `app_webview.py`     | 起 server → 背景載入模型 → Edge `--app` 開窗（fallback 預設瀏覽器）→ 等關閉收 server |
+
+## bridge.js 傳輸偵測
+
+| 條件 | 模式 | 傳輸 |
 |---|---|---|
-| `window.pywebview.api` 存在 | `desktop` | pywebview js_api（`app_webview.py`）|
-| HTTP 且 `/health` 回 200 | `web` | 端點 HTTP（`api_server.py`）|
-| 其餘（含純靜態伺服）| `mock` | 內建範例資料（設計預覽）|
+| HTTP 且 `/health` 回 200 | `web` | `/api/*`（桌面本機 server / 端點 LAN）；進度經 SSE `/api/events` |
+| 其餘（含純靜態伺服 / file://）| `mock` | 內建範例資料（設計預覽） |
 
-UI 只呼叫 `QwenAPI.transcribe()` 等抽象方法，不需知道底層。
-桌面獨有能力（如 `pickFile` 原生對話框）在 web/mock 回 `null`，
-UI 自動 fallback（改用 `<input type=file>`）。
+UI 只呼叫 `QwenAPI.transcribe()` 等抽象方法。檔案選擇走瀏覽器原生
+`<input type=file>` → 以 multipart 上傳到本機 server，與端點版走相同路徑。
 
-進度等長時間事件走內建 event bus：後端以
-`window.evaluate_js("QwenAPI._emit('progress', {...})")` 主動推回，
-三種傳輸共用同一組 `QwenAPI.on('progress', …)`。
-
-## 本機預覽（無需後端）
+## 本機預覽（純設計，無後端）
 
 ```bash
 python -m http.server 8777 --bind 127.0.0.1   # 於 webview/ 下執行
-# 開 http://127.0.0.1:8777/index.html → 自動進 mock 模式，可完整點選
+# 開 http://127.0.0.1:8777/index.html → /health 探測失敗 → 自動 mock 模式
 ```
 
 ## 桌面實機
 
 ```bash
-python app_webview.py     # 載入本資料夾，js_api 接上真實 ASREngine
+python app_webview.py          # 起本機 server + 載入模型 + Edge --app 開窗
+# 除錯：python webview_server.py 固定起在 :8765，再用瀏覽器開
 ```

@@ -131,9 +131,26 @@ class WebViewServer:
                 except Exception:
                     return {}
 
+            # ── DNS rebinding / CSRF 防護 ─────────────────────
+            #   惡意網站可能用 DNS rebinding 把網域指向 127.0.0.1，或跨站
+            #   POST 到本機 /api（端點有副作用）。要求 Host/Origin 必須是
+            #   本機回環位址 —— Edge --app 載入的就是 127.0.0.1:port，會通過。
+            def _check_host(self) -> bool:
+                allowed = {f"127.0.0.1:{server.port}", f"localhost:{server.port}"}
+                if self.headers.get("Host", "") not in allowed:
+                    self._err(403, "bad host")
+                    return False
+                origin = self.headers.get("Origin")
+                if origin and origin not in {f"http://{a}" for a in allowed}:
+                    self._err(403, "bad origin")
+                    return False
+                return True
+
             # ── GET ───────────────────────────────────────────
             def do_GET(self):
                 path = urlparse(self.path).path
+                if (path.startswith("/api/") or path == "/health") and not self._check_host():
+                    return
                 if path == "/health":
                     b = server.backend
                     return self._json({"status": "ok",
@@ -157,6 +174,8 @@ class WebViewServer:
             # ── POST ──────────────────────────────────────────
             def do_POST(self):
                 path = urlparse(self.path).path
+                if not self._check_host():        # 所有 POST 皆為 /api，一律驗證
+                    return
                 try:
                     if path == "/api/settings":
                         return self._json(server.backend.set_settings(self._read_json_body()))

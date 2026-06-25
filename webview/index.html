@@ -83,7 +83,8 @@
           <button class="btn btn-ghost" id="btn-open-dir" disabled>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>開啟輸出資料夾
           </button>
-          <button class="btn btn-ghost" id="btn-verify" disabled>
+          <!-- 字幕驗證：對應模組於 WebView 上尚未重新規劃，暫時隱藏 -->
+          <button class="btn btn-ghost" id="btn-verify" hidden disabled>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>字幕驗證
           </button>
           <div class="sp"></div>
@@ -212,6 +213,8 @@
             <input type="range" class="slider" id="set-scale" min="80" max="150" step="5" value="100"><span class="slider-val" id="set-scale-val">100%</span></div>
           <div class="row"><div class="label"><div class="t">輸出格式</div><div class="d">全域預設，影響單檔／批次／端點</div></div>
             <div class="seg" id="set-format"><button class="on" data-v="srt">SRT 字幕</button><button data-v="txt">純文字</button></div></div>
+          <div class="row"><div class="label"><div class="t">語音偵測靈敏度（VAD）</div><div class="d">降低閾值可減少漏識（被當成空白的片段可能有聲音）；提高則減少假陽性。預設 0.50</div></div>
+            <input type="range" class="slider" id="set-vad" min="0.30" max="0.80" step="0.01" value="0.50"><span class="slider-val" id="set-vad-val">0.50</span></div>
           <div class="row"><div class="label"><div class="t">簡繁詞彙轉換</div><div class="d">把模型輸出轉成在地用語</div></div>
             <div class="seg" id="set-vocab"><button data-v="off">關閉</button><button class="on" data-v="s2twp">台灣用語</button><button data-v="s2t">標準</button></div></div>
           <div class="row"><div class="label"><div class="t">HuggingFace 鏡像站</div><div class="d">下載模型較慢時可改用鏡像</div></div>

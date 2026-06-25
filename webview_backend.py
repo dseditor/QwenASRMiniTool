@@ -60,6 +60,7 @@ class WebBackend:
         self._server = None              # api_server.TranscribeServer（LAN 端點）
         self._on_event = on_event
         self._lock = threading.Lock()
+        self._apply_vad_from_settings()  # 啟動即套用持久化的 VAD 閾值
 
     # ── 事件推送 ────────────────────────────────────────────
     def _emit(self, event: str, payload: dict):
@@ -263,6 +264,7 @@ class WebBackend:
             "ffmpeg": s.get("ffmpeg_path", ""),
             "theme": s.get("appearance", "light"),
             "uiLang": s.get("ui_lang", "繁體中文"),
+            "vad": float(s.get("vad_threshold", 0.5)),
         }
 
     def set_settings(self, patch: dict) -> dict:
@@ -275,7 +277,7 @@ class WebBackend:
             cur = {}
         key_map = {"scale": "ui_scale", "format": "output_format", "vocab": "vocab_convert",
                    "mirror": "hf_mirror", "ffmpeg": "ffmpeg_path", "theme": "appearance",
-                   "uiLang": "ui_lang"}
+                   "uiLang": "ui_lang", "vad": "vad_threshold"}
         for k, v in (patch or {}).items():
             if k in key_map:
                 cur[key_map[k]] = v
@@ -283,7 +285,22 @@ class WebBackend:
             f.write_text(json.dumps(cur, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
             pass
+        if "vad" in (patch or {}):
+            self._apply_vad(patch["vad"])      # 即時生效（_detect_speech_groups 讀全域）
         return self.get_settings()
+
+    def _apply_vad(self, value):
+        """把 VAD 閾值即時套到 app 模組全域 —— _detect_speech_groups 於呼叫時讀取。"""
+        try:
+            core.VAD_THRESHOLD = float(value)
+        except Exception:
+            pass
+
+    def _apply_vad_from_settings(self):
+        try:
+            self._apply_vad(self.get_settings().get("vad", 0.5))
+        except Exception:
+            pass
 
     # ── LAN 端點服務（重用 api_server.TranscribeServer）─────
     def get_endpoint(self) -> dict:

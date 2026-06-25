@@ -98,7 +98,6 @@
       renderResult(res.segments);
       logLine("✓ 完成，共 " + res.segments.length + " 段" + (res.srtPath ? "，已輸出 " + res.srtPath : ""));
       $("#btn-open-dir").disabled = false;
-      $("#btn-verify").disabled = false;
     } catch (err) {
       showProgress(0, "");
       $("#progress").hidden = true;
@@ -466,12 +465,16 @@
     segSet("#set-format", s.format); segSet("#set-vocab", s.vocab); segSet("#set-theme", s.theme);
     $("#set-mirror").value = s.mirror || "";
     if (s.ffmpeg) $("#set-ffmpeg").value = s.ffmpeg;
+    if (s.vad != null) { $("#set-vad").value = s.vad; $("#set-vad-val").textContent = (+s.vad).toFixed(2); }
   }
   function segSet(sel, v) { $$(sel + " button").forEach(b => b.classList.toggle("on", b.dataset.v === v)); }
   function applyScale(pct) { document.documentElement.style.fontSize = (14 * pct / 100).toFixed(1) + "px"; }
 
   $("#set-scale").addEventListener("input", e => {
     const v = +e.target.value; $("#set-scale-val").textContent = v + "%"; applyScale(v); API.setSettings({ scale: v });
+  });
+  $("#set-vad").addEventListener("input", e => {
+    const v = +e.target.value; $("#set-vad-val").textContent = v.toFixed(2); API.setSettings({ vad: v });
   });
   // segmented 控制：點擊切換 + 回寫設定
   [["#set-format", "format"], ["#set-vocab", "vocab"], ["#set-theme", "theme"]].forEach(([sel, key]) => {

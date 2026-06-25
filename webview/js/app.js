@@ -110,7 +110,15 @@
     }
   });
 
-  API.on("progress", ({ pct, status }) => showProgress(pct, status));
+  // 進度分派：批次執行中 → 更新當前批次列；否則 → 單檔進度條
+  API.on("progress", ({ pct, status }) => {
+    if (batchRunning && batchActiveIdx >= 0) {
+      batchItems[batchActiveIdx].progress = pct / 100;
+      updateBatchRow(batchActiveIdx);
+    } else {
+      showProgress(pct, status);
+    }
+  });
   function showProgress(pct, status) {
     $("#progress").hidden = false;
     $("#prog-bar").style.width = pct + "%";
@@ -161,31 +169,94 @@
   }
 
   // ════════════════════════════════════════════════════════
-  // 批次
+  // 批次（client-side 佇列：循序呼叫既有 /api/transcribe）
   // ════════════════════════════════════════════════════════
   const ST = {
     done: ["完成", "chip-ok"], running: ["辨識中", "chip-accent"],
     pending: ["待處理", "chip-muted"], failed: ["失敗", "chip-live"],
   };
-  async function renderBatch() {
-    const b = await API.getBatch();
-    $("#batch-summary").textContent = `${b.summary.done} / ${b.summary.total} 完成`;
-    const host = $("#batch-list"); host.innerHTML = "";
-    b.items.forEach(it => {
-      const [label, cls] = ST[it.status] || ST.pending;
-      const row = document.createElement("div");
-      row.className = "b-row";
-      row.innerHTML = `
-        <div class="nm"><div class="f">${escapeHtml(it.name)}</div>
-          ${it.error ? `<div class="e">${escapeHtml(it.error)}</div>` : ""}</div>
-        <div class="pbar"><div class="bar"><i style="width:${Math.round((it.progress || 0) * 100)}%"></i></div></div>
-        <span class="chip ${cls}">${label}</span>
-        <button class="more" title="更多">⋯</button>`;
-      host.appendChild(row);
-    });
+  let batchItems = [];                          // {file, name, status, progress, srtPath?, error?}
+  let batchRunning = false, batchActiveIdx = -1;
+
+  // 隱藏的多檔選擇器（瀏覽器原生）
+  const batchInput = document.createElement("input");
+  batchInput.type = "file"; batchInput.accept = "audio/*,video/*";
+  batchInput.multiple = true; batchInput.style.display = "none";
+  document.body.appendChild(batchInput);
+  batchInput.addEventListener("change", e => {
+    for (const f of e.target.files) batchItems.push({ file: f, name: f.name, status: "pending", progress: 0 });
+    batchInput.value = "";
+    renderBatch();
+  });
+
+  function batchSummary() {
+    const done = batchItems.filter(i => i.status === "done").length;
+    $("#batch-summary").textContent = `${done} / ${batchItems.length} 完成`;
   }
-  $("#btn-batch-add").addEventListener("click", async () => { await API.addBatchFiles(); renderBatch(); });
-  $("#btn-batch-run").addEventListener("click", async () => { await API.runBatch(); });
+  function renderBatch() {
+    batchSummary();
+    const host = $("#batch-list"); host.innerHTML = "";
+    if (!batchItems.length) {
+      host.innerHTML = `<div class="card" style="text-align:center;color:var(--muted);padding:28px">
+        尚未加入檔案 — 點「加入檔案」可一次選多個音訊循序處理。</div>`;
+      return;
+    }
+    batchItems.forEach((it, idx) => host.appendChild(batchRow(it, idx)));
+  }
+  function batchRow(it, idx) {
+    const [label, cls] = ST[it.status] || ST.pending;
+    const row = document.createElement("div");
+    row.className = "b-row"; row.dataset.idx = idx;
+    row.innerHTML = `
+      <div class="nm"><div class="f">${escapeHtml(it.name)}</div>
+        ${it.error ? `<div class="e">${escapeHtml(it.error)}</div>` : ""}</div>
+      <div class="pbar"><div class="bar"><i style="width:${Math.round((it.progress || 0) * 100)}%"></i></div></div>
+      <span class="chip ${cls}">${label}</span>
+      <button class="more" title="${it.status === "done" ? "開啟輸出資料夾" : "移除"}">⋯</button>`;
+    row.querySelector(".more").addEventListener("click", () => {
+      if (it.status === "done") API.openOutputDir();
+      else if (!batchRunning) { batchItems.splice(idx, 1); renderBatch(); }
+    });
+    return row;
+  }
+  function updateBatchRow(idx) {
+    const it = batchItems[idx];
+    const row = $(`.b-row[data-idx="${idx}"]`); if (!row) return;
+    const [label, cls] = ST[it.status] || ST.pending;
+    row.querySelector(".pbar i").style.width = Math.round((it.progress || 0) * 100) + "%";
+    const chip = row.querySelector(".chip"); chip.className = "chip " + cls; chip.textContent = label;
+    batchSummary();
+  }
+
+  $("#btn-batch-add").addEventListener("click", () => batchInput.click());
+  $("#btn-batch-run").addEventListener("click", runBatch);
+
+  async function runBatch() {
+    if (batchRunning) return;
+    if (!batchItems.some(i => i.status !== "done")) return;
+    batchRunning = true;
+    $("#btn-batch-run").disabled = true; $("#btn-batch-add").disabled = true;
+    for (let i = 0; i < batchItems.length; i++) {
+      const it = batchItems[i];
+      if (it.status === "done") continue;
+      batchActiveIdx = i; it.status = "running"; it.progress = 0; it.error = null;
+      renderBatch();
+      try {
+        const res = await API.transcribe({
+          file: it.file, language: null,
+          diarize: $("#sw-diar").checked, nSpeakers: $("#sel-spk").value,
+          align: $("#sw-align").checked, hint: "",
+        });
+        it.status = "done"; it.progress = 1; it.srtPath = res.srtPath;
+      } catch (err) {
+        it.status = "failed"; it.progress = 0;
+        it.error = (err.message || String(err)).replace(/^⚠\s*/, "");
+      }
+      renderBatch();
+    }
+    batchActiveIdx = -1; batchRunning = false;
+    $("#btn-batch-run").disabled = false; $("#btn-batch-add").disabled = false;
+  }
 
   // ════════════════════════════════════════════════════════
   // 模型與裝置

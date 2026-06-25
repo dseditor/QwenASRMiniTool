@@ -78,9 +78,12 @@ class WebBackend:
 
     def _load_worker(self):
         try:
+            # webview 目前僅就地載入 OpenVINO；GPU 核心(chatllm/crisp)的載入仍
+            # 開發中，故不論 settings.backend 為何，先以 CPU(OpenVINO) 啟動。
             self.engine.load(device="CPU", model_dir=core._DEFAULT_MODEL_DIR,
                              cb=lambda m: self._emit("progress", {"pct": 0, "status": m}))
             self._loaded = True
+            self._active_backend = "openvino"
             self._emit("status", {"modelReady": True})
         except Exception as e:
             self._load_err = str(e)
@@ -204,27 +207,32 @@ class WebBackend:
             diag = {"level": "warn", "text": f"GPU 偵測例外：{e}"}
         return {"devices": devices, "diag": diag}
 
-    # ── 核心切換 ────────────────────────────────────────────
-    #   OpenVINO：就地重載(安全)。
-    #   chatllm / Whisper-Breeze(GPU)：不在本行程就地載入 —— chatllm DLL 在核心
-    #   切換時 Vulkan context 未釋放會整機當機(見記憶 vulkan-dual-context-crash)，
-    #   需沿用桌面版的裝置選擇與子程序隔離流程。先持久化選擇，回明確訊息。
+    # ── 核心切換：持久化選擇 + 請使用者重啟（不就地熱重載）─────
+    #   理由：① chatllm DLL 在核心切換時 Vulkan context 未釋放會整機當機
+    #   (見記憶 vulkan-dual-context-crash)；② 統一所有核心的切換行為，最安全。
+    #   chatllm 保留原桌面實作以向下相容；未來全面改 casr，但切換一律需重啟。
     _BACKENDS = {0: "openvino", 1: "chatllm", 2: "crisp"}
+    _BACKEND_LABELS = {
+        "openvino": "CPU · OpenVINO INT8",
+        "chatllm":  "GPU · chatllm Vulkan",
+        "crisp":    "GPU · Whisper / Breeze-ASR",
+    }
 
     def set_backend(self, idx) -> dict:
         backend = self._BACKENDS.get(int(idx) if str(idx).isdigit() else 0, "openvino")
+        label = self._BACKEND_LABELS.get(backend, backend)
         self._persist_backend(backend)
+        active = getattr(self, "_active_backend", "openvino")
+        if backend == active:
+            return {"ok": True, "backend": backend, "restartRequired": False,
+                    "message": f"「{label}」已是目前使用的核心。"}
         if backend == "openvino":
-            if self._loading:
-                return {"ok": False, "backend": backend, "message": "模型載入中，請稍候再切換。"}
-            threading.Thread(target=self._reload_openvino, name="reload-ov", daemon=True).start()
-            return {"ok": True, "backend": backend, "reloading": True}
-        return {
-            "ok": False, "backend": backend,
-            "message": ("GPU 核心（chatllm / Whisper-Breeze）的切換尚未在 WebView 版接通。"
-                        "為避免核心切換時的顯卡當機風險，請暫用桌面版切換，或維持 "
-                        "CPU(OpenVINO) 核心。已記住你的選擇。"),
-        }
+            return {"ok": True, "backend": backend, "restartRequired": True,
+                    "message": f"已記住「{label}」。請重新啟動程式以套用新核心。"}
+        # GPU 核心：webview 的就地載入仍開發中（且需桌面版的防當機隔離流程）
+        return {"ok": True, "backend": backend, "restartRequired": True,
+                "message": (f"已記住「{label}」。GPU 核心的 WebView 載入仍在開發中——"
+                            f"目前請改用桌面版使用此核心；重新啟動後將維持 CPU 核心運行。")}
 
     def _persist_backend(self, backend: str):
         f = Path(getattr(core, "SETTINGS_FILE", BASE_DIR / "settings.json"))
@@ -237,31 +245,6 @@ class WebBackend:
             f.write_text(json.dumps(cur, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
             pass
-
-    def _reload_openvino(self):
-        import gc
-        self._loading = True
-        self._loaded = False
-        self._load_err = None
-        self._emit("status", {"modelReady": False, "loading": True})
-        try:
-            old = self.engine
-            for attr in ("audio_enc", "embedder", "dec_req", "vad_sess"):
-                if hasattr(old, attr):
-                    setattr(old, attr, None)
-            gc.collect()
-            eng = core.ASREngine()
-            eng.load(device="CPU", model_dir=core._DEFAULT_MODEL_DIR,
-                     cb=lambda m: self._emit("progress", {"pct": 0, "status": m}))
-            self.engine = eng
-            self._loaded = True
-            self._emit("status", {"modelReady": True})
-        except Exception as e:
-            self._load_err = str(e)
-            traceback.print_exc()
-            self._emit("status", {"modelReady": False, "error": str(e)})
-        finally:
-            self._loading = False
 
     # ── 設定（讀寫既有 settings.json）───────────────────────
     def get_settings(self) -> dict:

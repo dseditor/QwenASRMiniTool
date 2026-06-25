@@ -20,6 +20,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -151,8 +152,12 @@ SRT_DIR = BASE_DIR / "subtitles"
 # Vulkan 裝置偵測
 # ══════════════════════════════════════════════════════
 
-def detect_vulkan_devices(chatllm_dir: str | Path) -> list[dict]:
-    """執行 main.exe --show_devices，解析所有非 CPU 的計算裝置。
+def probe_vulkan_devices(chatllm_dir: str | Path) -> dict:
+    """執行 main.exe --show_devices 並回傳「完整診斷」，供 UI 明確告知使用者。
+
+    與 detect_vulkan_devices() 不同：本函式不吞錯誤，而是把整個探測過程
+    的結果都帶回來，讓上層能分辨「真的沒有 GPU」與「chatllm 列舉失敗
+    （超時 / 崩潰 / 卡在內顯）」這兩種完全不同的情況。
 
     輸出格式（每裝置兩行）：
       0: Vulkan - VulkanO (AMD Radeon(TM) Graphics)
@@ -161,17 +166,25 @@ def detect_vulkan_devices(chatllm_dir: str | Path) -> list[dict]:
       1: CPU - CPU (AMD Ryzen 5 9600X 6-Core Processor)
          type: CPU
 
-    判斷邏輯：
-      - 行首 backend 欄位（Vulkan/CPU 等）決定裝置類型
-      - backend == "CPU" → 跳過；其餘（Vulkan, Metal, CUDA…）均列出
-      - 不依賴 type: 行，避免 NVIDIA/AMD/Intel 格式差異
-
-    回傳: [{'id': 0, 'name': 'AMD Radeon(TM) Graphics', 'vram_free': 7957908736}, ...]
-    失敗時回傳空清單。
+    回傳 dict：
+      {
+        "devices":     [...],     # 非 CPU 計算裝置（供推理選用）
+        "all_devices": [...],     # 全部列舉到的裝置（含 CPU/iGPU，供診斷）
+        "raw":         str,       # --show_devices 原始輸出（stdout+stderr）
+        "error":       str|None,  # 例外/超時訊息（None 表示正常結束）
+        "exit_code":   int|None,  # main.exe 結束碼
+        "exe_found":   bool,      # 是否找得到 main.exe
+      }
+    每個裝置 dict：{'id', 'name', 'vram_free', 'backend', 'is_cpu'}
     """
     exe = Path(chatllm_dir) / "main.exe"
+    diag: dict = {
+        "devices": [], "all_devices": [], "raw": "",
+        "error": None, "exit_code": None, "exe_found": exe.exists(),
+    }
     if not exe.exists():
-        return []
+        diag["error"] = f"找不到 main.exe：{exe}"
+        return diag
     try:
         result = subprocess.run(
             [str(exe), "--show_devices"],
@@ -181,9 +194,11 @@ def detect_vulkan_devices(chatllm_dir: str | Path) -> list[dict]:
             startupinfo=_STARTUP_INFO,
         )
         output = result.stdout + result.stderr
-        pending: list[dict] = []   # 尚未確認 vram_free 的裝置
-        current: dict | None = None
+        diag["raw"] = output
+        diag["exit_code"] = result.returncode
 
+        pending: list[dict] = []
+        current: dict | None = None
         for line in output.splitlines():
             # 裝置標頭行：「0: Vulkan - VulkanO (AMD Radeon(TM) Graphics)」
             m = re.match(r"\s*(\d+):\s*(\S+)\s+-\s+\S+\s+\((.+)\)", line)
@@ -193,7 +208,8 @@ def detect_vulkan_devices(chatllm_dir: str | Path) -> list[dict]:
                     "id":        int(m.group(1)),
                     "name":      m.group(3).strip(),
                     "vram_free": 0,
-                    "_skip":     backend == "CPU",   # 只排除純 CPU 裝置
+                    "backend":   backend,
+                    "is_cpu":    backend == "CPU",
                 }
                 pending.append(current)
             elif "memory free" in line and current is not None:
@@ -201,12 +217,29 @@ def detect_vulkan_devices(chatllm_dir: str | Path) -> list[dict]:
                 if mf:
                     current["vram_free"] = int(mf.group(1))
 
-        return [
-            {"id": d["id"], "name": d["name"], "vram_free": d["vram_free"]}
-            for d in pending if not d["_skip"]
-        ]
-    except Exception:
-        return []
+        diag["all_devices"] = pending
+        diag["devices"] = [d for d in pending if not d["is_cpu"]]
+    except subprocess.TimeoutExpired:
+        diag["error"] = (
+            "main.exe --show_devices 逾時（10 秒）。"
+            "常見於筆電多 GPU 環境，Vulkan 初始化卡在內建顯示卡。"
+        )
+    except Exception as e:
+        diag["error"] = f"{type(e).__name__}: {e}"
+    return diag
+
+
+def detect_vulkan_devices(chatllm_dir: str | Path) -> list[dict]:
+    """執行 main.exe --show_devices，解析所有非 CPU 的計算裝置（薄包裝）。
+
+    保留舊簽名以維持向後相容；完整診斷請改用 probe_vulkan_devices()。
+    回傳: [{'id', 'name', 'vram_free'}, ...]，失敗時回傳空清單。
+    """
+    diag = probe_vulkan_devices(chatllm_dir)
+    return [
+        {"id": d["id"], "name": d["name"], "vram_free": d["vram_free"]}
+        for d in diag["devices"]
+    ]
 
 
 # ══════════════════════════════════════════════════════
@@ -291,7 +324,15 @@ class _ChatLLMRunner:
                 f"可能原因：裝置不相容、模型錯誤或記憶體不足。\n"
                 f"chatllm 輸出：{preview}"
             )
-        return output.split("<asr_text>", 1)[1].strip()
+        text = output.split("<asr_text>", 1)[1].strip()
+        deg = detect_degenerate_asr(text)
+        if deg:
+            raise RuntimeError(
+                f"GPU 推理退化：{deg}。\n"
+                f"此裝置／核心可能不相容，建議改用 CPU(OpenVINO) 核心。\n"
+                f"模型輸出：{text[:200]}"
+            )
+        return text
 
 
 # ══════════════════════════════════════════════════════
@@ -474,14 +515,23 @@ class _DLLASRRunner:
                 f"可能原因：裝置不相容、模型錯誤或記憶體不足。\n"
                 f"DLL 輸出：{preview}"
             )
-        return full.split("<asr_text>", 1)[1].strip()
+        text = full.split("<asr_text>", 1)[1].strip()
+        deg = detect_degenerate_asr(text)
+        if deg:
+            raise RuntimeError(
+                f"GPU 推理退化：{deg}。\n"
+                f"此裝置／核心可能不相容，建議改用 CPU(OpenVINO) 核心。\n"
+                f"模型輸出：{text[:200]}"
+            )
+        return text
 
 
 # ══════════════════════════════════════════════════════
 # 輔助函式（從 app.py 複製，避免循環 import）
 # ══════════════════════════════════════════════════════
 
-def _detect_speech_groups(audio: np.ndarray, vad_sess, max_group_sec: int = MAX_GROUP_SEC):
+def _detect_speech_groups(audio: np.ndarray, vad_sess, max_group_sec: int = MAX_GROUP_SEC,
+                          stats: dict | None = None):
     h  = np.zeros((2, 1, 64), dtype=np.float32)
     c  = np.zeros((2, 1, 64), dtype=np.float32)
     sr = np.array(SAMPLE_RATE, dtype=np.int64)
@@ -491,6 +541,11 @@ def _detect_speech_groups(audio: np.ndarray, vad_sess, max_group_sec: int = MAX_
         chunk = audio[i*VAD_CHUNK:(i+1)*VAD_CHUNK].astype(np.float32)[np.newaxis, :]
         out, h, c = vad_sess.run(None, {"input": chunk, "h": h, "c": c, "sr": sr})
         probs.append(float(out[0, 0]))
+    if stats is not None:
+        stats["n_chunks"]  = len(probs)
+        stats["max_prob"]  = max(probs) if probs else 0.0
+        stats["mean_prob"] = (sum(probs) / len(probs)) if probs else 0.0
+        stats["threshold"] = VAD_THRESHOLD
     if not probs:
         return [(0.0, len(audio) / SAMPLE_RATE, audio)]
 
@@ -506,6 +561,8 @@ def _detect_speech_groups(audio: np.ndarray, vad_sess, max_group_sec: int = MAX_
             in_sp = False
     if in_sp and n - s0 >= MIN_CH:
         raw.append((max(0, s0-PAD), n))
+    if stats is not None:
+        stats["n_segments"] = len(raw)
     if not raw:
         return []
 
@@ -537,6 +594,52 @@ def _detect_speech_groups(audio: np.ndarray, vad_sess, max_group_sec: int = MAX_
             continue
         result.append((gs / SAMPLE_RATE, ge / SAMPLE_RATE, ch))
     return result
+
+
+def format_vad_diag(stats: dict) -> str:
+    """把 _detect_speech_groups 的 stats 轉成「為什麼沒偵測到人聲」的明確說明。
+
+    區分三種情況：音檔過短 / 全段機率過低（純背景音或門檻太高）/ 有訊號但段落太短。
+    """
+    n    = stats.get("n_chunks", 0)
+    mp   = stats.get("max_prob", 0.0)
+    th   = stats.get("threshold", VAD_THRESHOLD)
+    nseg = stats.get("n_segments", 0)
+    if n == 0:
+        return "⚠ 未偵測到人聲：音訊過短或為空檔。"
+    if mp < th:
+        return (f"⚠ 未偵測到人聲：全段人聲機率偏低（最高 {mp:.2f} < 門檻 {th:.2f}）。"
+                f"可能為純背景音／音樂，或門檻過高 —— 可至『設定 → VAD 靈敏度』調低後重試。")
+    if nseg == 0:
+        return (f"⚠ 未偵測到人聲：偵測到語音訊號（最高 {mp:.2f}）但每段都過短（< 0.5 秒）未成段。")
+    return "⚠ 未偵測到人聲：無有效語音分段。"
+
+
+def detect_degenerate_asr(text: str) -> str | None:
+    """偵測 ASR 退化輸出（模型複誦提示範本 / 高度重複），回傳原因字串；正常回 None。
+
+    chatllm 在部分不相容 GPU（常見 AMD Vulkan）上會吐出複誦 system prompt 的垃圾，
+    例如 'language en<asr_text>[transcription]' 或同字無限重複。這類內容不該被當成
+    字幕寫出，需明確判為推理失敗（issue #30）。
+    """
+    t = (text or "").strip()
+    if not t:
+        return None   # 空字串交由上層「未偵測到人聲／跳過」邏輯處理
+    low = t.lower()
+    # 1) 殘留 prompt 範本 token（最明確的退化訊號）
+    for tok in ("<asr_text", "asr_text>", "[transcription]", "[asr_text]"):
+        if tok in low:
+            return "模型輸出殘留提示範本（疑似未正常辨識）"
+    # 2) 整段就是語言標記 'language xx'（exact，避免誤判 'Language is power'）
+    if re.fullmatch(r"language\s+[a-z]{2}", low):
+        return "模型僅複誦語言標記，未產生轉錄內容"
+    if low.count("language ") >= 3:
+        return "模型反覆複誦語言標記（疑似推理退化）"
+    # 3) 單一字元高度重複
+    compact = re.sub(r"\s+", "", t)
+    if len(compact) >= 12 and max(Counter(compact).values()) / len(compact) >= 0.85:
+        return "模型輸出高度重複（疑似推理退化）"
+    return None
 
 
 def _split_to_lines(text: str) -> list[str]:
@@ -866,8 +969,18 @@ class ChatLLMASREngine:
                 for t0, t1, spk in diar_segs
             ]
         else:
-            vad_groups = _detect_speech_groups(audio, self.vad_sess, self.max_chunk_secs)
+            if self.vad_sess is None:
+                self._last_vad_diag = "⚠ VAD 模型（silero_vad）未載入，無法分段"
+                if progress_cb:
+                    progress_cb(0, 1, self._last_vad_diag)
+                return None
+            _vad_stats: dict = {}
+            vad_groups = _detect_speech_groups(
+                audio, self.vad_sess, self.max_chunk_secs, stats=_vad_stats)
             if not vad_groups:
+                self._last_vad_diag = format_vad_diag(_vad_stats)
+                if progress_cb:
+                    progress_cb(0, 1, self._last_vad_diag)
                 return None
             groups_spk = [(g0, g1, chunk, None) for g0, g1, chunk in vad_groups]
 

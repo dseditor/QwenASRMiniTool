@@ -521,7 +521,8 @@ class BatchTab(ctk.CTkFrame):
             item.status   = "完成" if srt else "失敗"
             item.progress = 1.0 if srt else 0.0
             if not srt:
-                item.error_msg = "未偵測到人聲，無輸出"
+                diag = getattr(self._engine, "_last_vad_diag", None)
+                item.error_msg = (diag or "未偵測到人聲，無輸出").lstrip("⚠ ").strip()
         except InterruptedError:
             item.status   = "待處理"
             item.progress = 0.0

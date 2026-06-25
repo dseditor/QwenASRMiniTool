@@ -39,12 +39,20 @@ import customtkinter as ctk
 
 # ── chatllm 後端（可選，import 延遲到 load 時進行）────────────────────
 try:
-    from chatllm_engine import ChatLLMASREngine, detect_vulkan_devices
+    from chatllm_engine import (
+        ChatLLMASREngine, detect_vulkan_devices, probe_vulkan_devices,
+        format_vad_diag, detect_degenerate_asr,
+    )
     _CHATLLM_AVAILABLE = True
 except Exception:
     _CHATLLM_AVAILABLE = False
     ChatLLMASREngine   = None
     def detect_vulkan_devices(_): return []
+    def probe_vulkan_devices(_):
+        return {"devices": [], "all_devices": [], "raw": "",
+                "error": "chatllm 未載入", "exit_code": None, "exe_found": False}
+    def format_vad_diag(_stats): return "⚠ 未偵測到人聲，未產生字幕"
+    def detect_degenerate_asr(_text): return None
 
 # ── CrispASR 後端（可選，Whisper/Breeze 走 Vulkan）─────────────────────
 try:
@@ -140,8 +148,13 @@ ALIGNER_MODEL_NAME = "Qwen3-ForcedAligner-0.6B"
 # 共用工具函式
 # ══════════════════════════════════════════════════════
 
-def _detect_speech_groups(audio: np.ndarray, vad_sess, max_group_sec: int = MAX_GROUP_SEC) -> list[tuple[float, float, np.ndarray]]:
-    """Silero VAD 分段，回傳 [(start_s, end_s, chunk), ...]"""
+def _detect_speech_groups(audio: np.ndarray, vad_sess, max_group_sec: int = MAX_GROUP_SEC,
+                          stats: dict | None = None) -> list[tuple[float, float, np.ndarray]]:
+    """Silero VAD 分段，回傳 [(start_s, end_s, chunk), ...]
+
+    可傳入 stats dict，函式會填入 n_chunks / max_prob / mean_prob / threshold /
+    n_segments，供上層在「未偵測到人聲」時產生明確診斷（見 format_vad_diag）。
+    """
     h  = np.zeros((2, 1, 64), dtype=np.float32)
     c  = np.zeros((2, 1, 64), dtype=np.float32)
     sr = np.array(SAMPLE_RATE, dtype=np.int64)
@@ -151,6 +164,11 @@ def _detect_speech_groups(audio: np.ndarray, vad_sess, max_group_sec: int = MAX_
         chunk = audio[i*VAD_CHUNK:(i+1)*VAD_CHUNK].astype(np.float32)[np.newaxis, :]
         out, h, c = vad_sess.run(None, {"input": chunk, "h": h, "c": c, "sr": sr})
         probs.append(float(out[0, 0]))
+    if stats is not None:
+        stats["n_chunks"]  = len(probs)
+        stats["max_prob"]  = max(probs) if probs else 0.0
+        stats["mean_prob"] = (sum(probs) / len(probs)) if probs else 0.0
+        stats["threshold"] = VAD_THRESHOLD
     if not probs:
         return [(0.0, len(audio) / SAMPLE_RATE, audio)]
 
@@ -166,6 +184,8 @@ def _detect_speech_groups(audio: np.ndarray, vad_sess, max_group_sec: int = MAX_
             in_sp = False
     if in_sp and n - s0 >= MIN_CH:
         raw.append((max(0, s0-PAD), n))
+    if stats is not None:
+        stats["n_segments"] = len(raw)
     if not raw:
         return []
 
@@ -721,6 +741,8 @@ class ASREngine:
         """
         from audio_io import load_audio_16k_mono
         audio, _ = load_audio_16k_mono(audio_path, SAMPLE_RATE)
+        self._deg_count = 0          # 本次退化（異常）輸出段數
+        self._last_vad_diag = None   # 本次「未產生字幕」的明確原因
 
         # ── 分段策略：說話者分離 vs 傳統 VAD ─────────────────────────
         # groups_spk: [(g0_sec, g1_sec, audio_chunk, speaker_label | None), ...]
@@ -736,8 +758,18 @@ class ASREngine:
                 for t0, t1, spk in diar_segs
             ]
         else:
-            vad_groups = _detect_speech_groups(audio, self.vad_sess, self.max_chunk_secs)
+            if self.vad_sess is None:
+                self._last_vad_diag = "⚠ VAD 模型（silero_vad）未載入，無法分段"
+                if progress_cb:
+                    progress_cb(0, 1, self._last_vad_diag)
+                return None
+            _vad_stats: dict = {}
+            vad_groups = _detect_speech_groups(
+                audio, self.vad_sess, self.max_chunk_secs, stats=_vad_stats)
             if not vad_groups:
+                self._last_vad_diag = format_vad_diag(_vad_stats)
+                if progress_cb:
+                    progress_cb(0, 1, self._last_vad_diag)
                 return None
             groups_spk = [(g0, g1, chunk, None) for g0, g1, chunk in vad_groups]
 
@@ -795,6 +827,15 @@ class ASREngine:
             if not raw_text:
                 continue
 
+            # 退化輸出（複誦提示範本 / 高度重複）→ 不寫入垃圾字幕，跳過並記錄
+            deg = detect_degenerate_asr(raw_text)
+            if deg:
+                self._deg_count = getattr(self, "_deg_count", 0) + 1
+                self._deg_reason = deg
+                if progress_cb:
+                    progress_cb(i, total, f"[{i+1}/{total}] 略過異常輸出：{deg}")
+                continue
+
             # ── ForcedAligner 精確時間軸對齊（chatllm .bin，CPU -ngl 0）──
             #    把 chunk 寫成暫存 wav，交給 chatllm main.exe 做字級對齊，
             #    再用 _ts_chatllm_to_subtitle_lines 依字級時間軸＋標點切行。
@@ -833,6 +874,13 @@ class ASREngine:
                 )
 
         if not all_subs:
+            # 全部段落都退化（垃圾輸出）→ 給明確原因，而非「未偵測到人聲」
+            if getattr(self, "_deg_count", 0) > 0:
+                self._last_vad_diag = (
+                    f"⚠ 模型輸出異常（{getattr(self, '_deg_reason', '推理退化')}），"
+                    f"共 {self._deg_count} 段被略過，未產生有效字幕。"
+                    f"此核心／裝置可能不相容，建議改用 CPU(OpenVINO) 核心。"
+                )
             return None
 
         if progress_cb:
@@ -1681,18 +1729,25 @@ class App(ctk.CTk):
 
         # ── Vulkan 裝置（NVIDIA / AMD）──────────────────────────────────
         nvidia_amd: list[dict] = []
+        vk_diag: dict = {"devices": [], "all_devices": [], "raw": "",
+                         "error": None, "exit_code": None, "exe_found": False}
         if _CHATLLM_AVAILABLE:
             chatllm_dir = str(_CHATLLM_DIR)
             if not _CHATLLM_DIR.exists():
                 # 嘗試 chatllmtest 目錄（開發模式）
                 chatllm_dir = str(BASE_DIR / "chatllmtest" / "chatllm_win_x64" / "bin")
-            nvidia_amd = detect_vulkan_devices(chatllm_dir)
+            vk_diag = probe_vulkan_devices(chatllm_dir)
+            nvidia_amd = [
+                {"id": d["id"], "name": d["name"], "vram_free": d["vram_free"]}
+                for d in vk_diag["devices"]
+            ]
 
         self._all_devices = {
             "cpu":       True,
             "igpu":      igpu_list,
             "nvidia_amd": nvidia_amd,
         }
+        self._vk_diag = vk_diag
 
         # ── 更新 device_combo ────────────────────────────────────────────
         all_labels = list(ov_labels)
@@ -1701,6 +1756,43 @@ class App(ctk.CTk):
 
         self.device_combo.configure(values=all_labels)
         self.device_var.set(all_labels[0])
+
+    def _gpu_diag_lines(self) -> list[tuple[str, str]]:
+        """偵測不到獨立 GPU 時，依 self._vk_diag 產生要顯示給使用者的診斷行。
+
+        目的：把「真的沒有 GPU」與「chatllm 列舉失敗（逾時 / 崩潰 / 卡在內顯
+        跳不到第二張卡）」這兩種情況分開講清楚，而不是一律顯示「僅 CPU 可用」。
+
+        回傳 [(顯示文字, 顏色), ...]。
+        """
+        diag = getattr(self, "_vk_diag", None) or {}
+        GREY, WARN = "#888888", "#E0A030"
+
+        # chatllm 不存在（純 OpenVINO 發行包）→ 沒得用 Vulkan，屬正常
+        if not diag.get("exe_found", False):
+            return [("ℹ 未偵測到獨立 GPU，僅 CPU 推理可用", GREY)]
+
+        # 列舉到的全部裝置（含 CPU / 內顯），這份清單本身就是最有用的線索
+        enumerated = [d.get("name", "?") for d in diag.get("all_devices", [])]
+
+        # 探測過程出錯（逾時 / 崩潰）→ 不是「沒有 GPU」，是「沒問成」
+        err = diag.get("error")
+        if err:
+            lines = [(f"⚠ GPU 偵測未完成：{err}", WARN)]
+            if enumerated:
+                lines.append((f"　chatllm 列舉到：{', '.join(enumerated)}", GREY))
+            lines.append(("　已自動改用 CPU 推理；如需 GPU 請更新顯卡 / Vulkan 驅動", GREY))
+            return lines
+
+        # 有正常結束，但清單裡只有 CPU（典型：卡在內顯、跳不到獨立 GPU）
+        if enumerated:
+            return [
+                ("ℹ 未偵測到可用的獨立 GPU，僅 CPU 推理可用", GREY),
+                (f"　chatllm 僅列舉到：{', '.join(enumerated)}", GREY),
+            ]
+
+        # 完全沒有輸出
+        return [("ℹ 未偵測到獨立 GPU，僅 CPU 推理可用", GREY)]
 
     # ── 設定檔讀寫（記住模型路徑）──────────────────────────────────────
 
@@ -2016,10 +2108,11 @@ class App(ctk.CTk):
                 font=FONT_BODY, anchor="w",
             ).pack(anchor="w", padx=20, pady=2)
         if not igpu_list and not nvidia_list:
-            ctk.CTkLabel(
-                dev_frame, text="ℹ 未偵測到獨立 GPU，僅 CPU 推理可用",
-                font=FONT_BODY, text_color="#888888", anchor="w",
-            ).pack(anchor="w", padx=20, pady=2)
+            for text, color in self._gpu_diag_lines():
+                ctk.CTkLabel(
+                    dev_frame, text=text, font=FONT_BODY, text_color=color,
+                    anchor="w", justify="left", wraplength=560,
+                ).pack(anchor="w", padx=20, pady=2)
         ctk.CTkLabel(dev_frame, text="").pack(pady=2)
 
         # ── 後端選擇 ──────────────────────────────────────────────────
@@ -2995,7 +3088,8 @@ class App(ctk.CTk):
                     self.prog_label.configure(text="完成"),
                 ])
             else:
-                self._file_log("⚠ 未偵測到人聲，未產生字幕")
+                diag = getattr(self.engine, "_last_vad_diag", None)
+                self._file_log(diag or "⚠ 未偵測到人聲，未產生字幕")
                 self.after(0, lambda: self.prog_bar.set(0))
         except Exception as e:
             self._file_log(f"❌ 錯誤：{e}")

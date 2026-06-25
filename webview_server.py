@@ -187,8 +187,8 @@ class WebViewServer:
                     if path == "/api/settings":
                         return self._json(server.backend.set_settings(self._read_json_body()))
                     if path == "/api/backend":
-                        return self._json({"ok": server.backend.set_backend(
-                            self._read_json_body().get("index"))})
+                        return self._json(server.backend.set_backend(
+                            self._read_json_body().get("index")))
                     if path == "/api/endpoint":
                         body = self._read_json_body()
                         act = body.get("action")

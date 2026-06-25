@@ -279,12 +279,32 @@
       const txt = diag.querySelector("div"); if (txt) txt.innerHTML = escapeHtml(d.diag.text);
     } else diag.hidden = true;
   }
-  $("#backend-cards").addEventListener("click", e => {
+  $("#backend-cards").addEventListener("click", async e => {
     const card = e.target.closest(".radio-card"); if (!card) return;
-    $$(".radio-card", $("#backend-cards")).forEach((c, i) => {
-      const sel = c === card; c.classList.toggle("sel", sel); if (sel) API.setBackend(i);
-    });
+    const cards = $$(".radio-card", $("#backend-cards"));
+    const idx = cards.indexOf(card);
+    const prevIdx = cards.findIndex(c => c.classList.contains("sel"));
+    cards.forEach((c, i) => c.classList.toggle("sel", i === idx));
+    const res = await API.setBackend(idx);
+    if (res && res.reloading) {
+      backendMsg("正在重新載入 CPU（OpenVINO）核心…完成後狀態燈會恢復就緒。", "info");
+    } else if (res && res.message) {
+      backendMsg(res.message, res.ok ? "info" : "warn");
+      if (res.ok === false && prevIdx >= 0) {           // GPU 核心未接通 → 視覺退回原選
+        cards.forEach((c, i) => c.classList.toggle("sel", i === prevIdx));
+      }
+    } else {
+      backendMsg("", null);
+    }
   });
+  function backendMsg(text, level) {
+    let el = $("#backend-msg");
+    if (!text) { if (el) el.hidden = true; return; }
+    if (!el) { el = document.createElement("div"); el.id = "backend-msg"; el.style.marginTop = "10px"; $("#backend-cards").after(el); }
+    el.hidden = false;
+    el.className = "banner " + (level === "warn" ? "banner-warn" : "banner-info");
+    el.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg><div>${escapeHtml(text)}</div>`;
+  }
   const ICON_CPU = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg>`;
   const ICON_GPU = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 18v2M18 18v2"/></svg>`;
 

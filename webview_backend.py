@@ -204,9 +204,64 @@ class WebBackend:
             diag = {"level": "warn", "text": f"GPU 偵測例外：{e}"}
         return {"devices": devices, "diag": diag}
 
-    def set_backend(self, idx) -> bool:
-        # 後端切換需重載模型，後續實作；先記錄選擇。
-        return True
+    # ── 核心切換 ────────────────────────────────────────────
+    #   OpenVINO：就地重載(安全)。
+    #   chatllm / Whisper-Breeze(GPU)：不在本行程就地載入 —— chatllm DLL 在核心
+    #   切換時 Vulkan context 未釋放會整機當機(見記憶 vulkan-dual-context-crash)，
+    #   需沿用桌面版的裝置選擇與子程序隔離流程。先持久化選擇，回明確訊息。
+    _BACKENDS = {0: "openvino", 1: "chatllm", 2: "crisp"}
+
+    def set_backend(self, idx) -> dict:
+        backend = self._BACKENDS.get(int(idx) if str(idx).isdigit() else 0, "openvino")
+        self._persist_backend(backend)
+        if backend == "openvino":
+            if self._loading:
+                return {"ok": False, "backend": backend, "message": "模型載入中，請稍候再切換。"}
+            threading.Thread(target=self._reload_openvino, name="reload-ov", daemon=True).start()
+            return {"ok": True, "backend": backend, "reloading": True}
+        return {
+            "ok": False, "backend": backend,
+            "message": ("GPU 核心（chatllm / Whisper-Breeze）的切換尚未在 WebView 版接通。"
+                        "為避免核心切換時的顯卡當機風險，請暫用桌面版切換，或維持 "
+                        "CPU(OpenVINO) 核心。已記住你的選擇。"),
+        }
+
+    def _persist_backend(self, backend: str):
+        f = Path(getattr(core, "SETTINGS_FILE", BASE_DIR / "settings.json"))
+        try:
+            cur = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+        except Exception:
+            cur = {}
+        cur["backend"] = backend
+        try:
+            f.write_text(json.dumps(cur, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _reload_openvino(self):
+        import gc
+        self._loading = True
+        self._loaded = False
+        self._load_err = None
+        self._emit("status", {"modelReady": False, "loading": True})
+        try:
+            old = self.engine
+            for attr in ("audio_enc", "embedder", "dec_req", "vad_sess"):
+                if hasattr(old, attr):
+                    setattr(old, attr, None)
+            gc.collect()
+            eng = core.ASREngine()
+            eng.load(device="CPU", model_dir=core._DEFAULT_MODEL_DIR,
+                     cb=lambda m: self._emit("progress", {"pct": 0, "status": m}))
+            self.engine = eng
+            self._loaded = True
+            self._emit("status", {"modelReady": True})
+        except Exception as e:
+            self._load_err = str(e)
+            traceback.print_exc()
+            self._emit("status", {"modelReady": False, "error": str(e)})
+        finally:
+            self._loading = False
 
     # ── 設定（讀寫既有 settings.json）───────────────────────
     def get_settings(self) -> dict:

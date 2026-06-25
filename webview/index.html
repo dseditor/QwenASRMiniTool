@@ -110,8 +110,15 @@
         <div class="result" id="result" hidden>
           <div class="sec-title">辨識結果</div>
           <div class="wave-panel">
-            <div class="wave" id="wave"><div class="playhead" id="playhead" style="left:42%"></div></div>
-            <div class="wave-time"><span>00:00</span><span id="wave-dur">01:16</span></div>
+            <div class="wave" id="wave"></div>
+            <div class="wave-time"><span>00:00</span><span id="wave-dur">00:00</span></div>
+            <div id="seg-strip" class="seg-strip"></div>
+            <div class="wave-ctrls">
+              <button class="play-btn" id="wave-play" aria-label="播放／暫停">
+                <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+              </button>
+              <span class="play-time"><span id="wave-cur">00:00</span> · 點波形、字幕或下方區塊可跳播</span>
+            </div>
           </div>
           <div class="subs" id="subs"></div>
         </div>

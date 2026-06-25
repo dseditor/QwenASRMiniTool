@@ -330,6 +330,34 @@ textarea.input { resize: vertical; min-height: 64px; font-size: 13px; line-heigh
   display: flex; justify-content: space-between; margin-top: 6px;
   font-family: var(--font-mono); font-size: 10.5px; color: var(--faint);
 }
+.wave { cursor: pointer; }
+.seg-mark { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(14,142,122,.16); pointer-events: none; }
+
+/* 波形下方：時間對齊的字幕區塊（Suno 式，可點選跳播）*/
+.seg-strip { position: relative; height: 26px; margin-top: 8px; }
+.seg-block {
+  position: absolute; top: 0; height: 24px; box-sizing: border-box;
+  padding: 4px 7px; border-radius: 5px; font-size: 11px; line-height: 16px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer;
+  background: var(--accent-tint); border: 1px solid var(--accent-soft); color: var(--ink-2);
+  transition: background .12s;
+}
+.seg-block:hover { background: var(--accent-soft); }
+.seg-block.playing { background: var(--accent); border-color: var(--accent); color: #fff; }
+.seg-block.spk-2 { background: #EDEAF6; border-color: #E0DAF0; }
+.seg-block.spk-3 { background: #F6EFE3; border-color: #ECDFC8; }
+.seg-block.playing.spk-2 { background: #5B4B9A; border-color: #5B4B9A; color: #fff; }
+.seg-block.playing.spk-3 { background: #8A6312; border-color: #8A6312; color: #fff; }
+
+/* 播放控制 */
+.wave-ctrls { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.play-btn {
+  width: 32px; height: 32px; border-radius: 50%; border: 0; cursor: pointer; flex: 0 0 auto;
+  background: var(--accent); color: #fff; display: grid; place-items: center;
+}
+.play-btn:hover { background: var(--accent-strong); }
+.play-btn svg { width: 15px; height: 15px; }
+.play-time { font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); }
 
 .subs { margin-top: 14px; display: flex; flex-direction: column; gap: 7px; }
 .sub-card {

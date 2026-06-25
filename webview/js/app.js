@@ -126,37 +126,145 @@
     if (status != null) $("#prog-status").textContent = status;
   }
 
-  // Signature：波形 + 字幕卡
-  function renderResult(segments) {
+  // ════ Signature：真實波形 + 播放 + 分段標註（Suno 式）════
+  //   用 Web Audio decodeAudioData 解出真實峰值畫波形；<audio> 播放，
+  //   播放頭跟走、已播段標色；波形下方對齊時間軸的字幕區塊 + 字幕卡
+  //   隨播放高亮，皆可點選 seek —— 肉眼即可看字幕與音訊的對齊準確度。
+  const WAVE_N = 200;
+  let audioEl = null, audioUrl = null, waveDur = 0, curSegs = [];
+
+  async function renderResult(segments) {
     $("#result").hidden = false;
-    const dur = segments.length ? segments[segments.length - 1].end : 60;
-    $("#wave-dur").textContent = fmtClock(dur);
-    drawWaveform($("#wave"), 0.55);            // 預設播放頭在 55%
-    const host = $("#subs"); host.innerHTML = "";
-    segments.forEach((s, i) => host.appendChild(subCard(s, i === 3)));
+    curSegs = segments;
+    cleanupAudio();
+
+    const file = picked && (picked.file || (picked instanceof Blob ? picked : null));
+    let peaks = null;
+    waveDur = segments.length ? segments[segments.length - 1].end : 0;
+
+    if (file instanceof Blob) {
+      audioUrl = URL.createObjectURL(file);
+      audioEl = new Audio(audioUrl);
+      try {                                   // 解碼取真實峰值（mp3/wav/m4a/webm…）
+        const ab = await file.arrayBuffer();
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const buf = await ctx.decodeAudioData(ab.slice(0));
+        waveDur = buf.duration || waveDur;
+        peaks = computePeaks(buf, WAVE_N);
+        ctx.close();
+      } catch (e) { peaks = null; }           // 不支援的格式 → 平波形，但仍可播
+    }
+    waveDur = waveDur || 60;
+
+    $("#wave-dur").textContent = fmtClock(waveDur);
+    drawWave($("#wave"), peaks, segments, waveDur);
+    renderSegStrip(segments, waveDur);
+    renderSubs(segments);
+    wireAudio();
   }
-  function subCard(s, playing) {
+
+  // 真實峰值：每桶取絕對值最大，整體正規化
+  function computePeaks(buf, n) {
+    const ch = buf.getChannelData(0);
+    const block = Math.max(1, Math.floor(ch.length / n));
+    const peaks = [];
+    for (let i = 0; i < n; i++) {
+      let mx = 0;
+      const base = i * block;
+      for (let j = 0; j < block; j++) { const v = Math.abs(ch[base + j] || 0); if (v > mx) mx = v; }
+      peaks.push(mx);
+    }
+    const norm = Math.max(...peaks, 1e-4);
+    return peaks.map(p => p / norm);
+  }
+
+  function drawWave(container, peaks, segments, dur) {
+    const n = peaks ? peaks.length : WAVE_N;
+    let bars = "";
+    for (let i = 0; i < n; i++) {
+      const amp = peaks ? peaks[i] : 0.12;
+      bars += `<div class="b" style="height:${Math.max(3, amp * 64).toFixed(1)}px"></div>`;
+    }
+    let marks = "";                            // 分段邊界標記
+    segments.forEach(s => {
+      marks += `<div class="seg-mark" style="left:${((s.start / dur) * 100).toFixed(2)}%"></div>`;
+    });
+    container.innerHTML = `<div class="playhead" id="playhead" style="left:0%"></div>${marks}${bars}`;
+  }
+
+  // 波形下方：依時間對齊的字幕區塊（Suno 式，可點選 seek）
+  function renderSegStrip(segments, dur) {
+    let host = $("#seg-strip");
+    if (!host) { host = document.createElement("div"); host.id = "seg-strip"; host.className = "seg-strip"; $(".wave-panel").appendChild(host); }
+    host.innerHTML = "";
+    segments.forEach((s, i) => {
+      const left = (s.start / dur) * 100, w = Math.max(0.6, ((s.end - s.start) / dur) * 100);
+      const blk = document.createElement("div");
+      blk.className = "seg-block" + (s.speaker ? " spk-" + (((s.speaker - 1) % 3) + 1) : "");
+      blk.style.left = left.toFixed(2) + "%"; blk.style.width = w.toFixed(2) + "%";
+      blk.dataset.seg = i; blk.title = s.text;
+      blk.textContent = s.text;
+      blk.addEventListener("click", () => seekTo(s.start));
+      host.appendChild(blk);
+    });
+  }
+
+  function renderSubs(segments) {
+    const host = $("#subs"); host.innerHTML = "";
+    segments.forEach((s, i) => host.appendChild(subCard(s, i)));
+  }
+  function subCard(s, idx) {
     const el = document.createElement("div");
-    el.className = "sub-card" + (playing ? " playing" : "");
+    el.className = "sub-card"; el.dataset.seg = idx;
     const spk = s.speaker ? `<span class="chip spk-${((s.speaker - 1) % 3) + 1}">說話者 ${s.speaker}</span>` : "";
     el.innerHTML = `<span class="tc">${fmtClock(s.start)} → ${fmtClock(s.end)}</span>
       <div class="body"><div class="spk">${spk}</div><div class="txt">${escapeHtml(s.text)}</div></div>`;
+    el.addEventListener("click", () => seekTo(s.start));
     return el;
   }
 
-  // 波形：產生穩定的擬語音柱狀（非真實音訊，視覺用）
-  function drawWaveform(container, playRatio) {
-    const N = 130, played = Math.floor(N * playRatio);
-    let html = `<div class="playhead" style="left:${(playRatio * 100).toFixed(1)}%"></div>`;
-    let seed = 7;
-    const rnd = () => (seed = (seed * 9301 + 49297) % 233280) / 233280;
-    for (let i = 0; i < N; i++) {
-      // 以多個正弦疊加製造語音般的起伏，再加雜訊
-      const env = Math.abs(Math.sin(i / 9) * 0.6 + Math.sin(i / 3.3) * 0.3) + rnd() * 0.35;
-      const h = Math.max(6, Math.min(64, env * 60));
-      html += `<div class="b${i < played ? " played" : ""}" style="height:${h.toFixed(0)}px"></div>`;
+  // ── 播放接線 ────────────────────────────────────────────
+  function wireAudio() {
+    const wave = $("#wave"), play = $("#wave-play");
+    const bars = $$(".b", wave);
+    if (audioEl) {
+      audioEl.addEventListener("timeupdate", onTime);
+      audioEl.addEventListener("play", () => setPlayIcon(true));
+      audioEl.addEventListener("pause", () => setPlayIcon(false));
+      audioEl.addEventListener("ended", () => { setPlayIcon(false); });
     }
-    container.innerHTML = html;
+    // 點波形 seek
+    wave.onclick = e => {
+      const r = wave.getBoundingClientRect();
+      seekTo(Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * waveDur);
+    };
+    if (play) play.onclick = () => { if (!audioEl) return; audioEl.paused ? audioEl.play() : audioEl.pause(); };
+
+    function onTime() {
+      const t = audioEl.currentTime, ratio = waveDur ? t / waveDur : 0;
+      const ph = $("#playhead"); if (ph) ph.style.left = (ratio * 100).toFixed(2) + "%";
+      const playedIdx = Math.floor(ratio * bars.length);
+      bars.forEach((b, i) => b.classList.toggle("played", i <= playedIdx));
+      const cur = curSegs.findIndex(s => t >= s.start && t < s.end);
+      $$(".sub-card").forEach(c => c.classList.toggle("playing", +c.dataset.seg === cur));
+      $$(".seg-block").forEach(c => c.classList.toggle("playing", +c.dataset.seg === cur));
+      const tm = $("#wave-cur"); if (tm) tm.textContent = fmtClock(t);
+      // 自動捲動到播放中的字幕卡
+      if (cur >= 0) { const el = $(`.sub-card[data-seg="${cur}"]`); if (el && playFollow) el.scrollIntoView({ block: "nearest" }); }
+    }
+  }
+  let playFollow = true;
+  function setPlayIcon(playing) {
+    const b = $("#wave-play"); if (!b) return;
+    b.innerHTML = playing
+      ? `<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>`
+      : `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>`;
+  }
+  function seekTo(sec) { if (audioEl) { audioEl.currentTime = sec; audioEl.play().catch(() => {}); } }
+  function cleanupAudio() {
+    try { if (audioEl) { audioEl.pause(); audioEl.src = ""; } } catch (e) {}
+    if (audioUrl) { try { URL.revokeObjectURL(audioUrl); } catch (e) {} audioUrl = null; }
+    audioEl = null;
   }
 
   $("#btn-open-dir").addEventListener("click", () => API.openOutputDir());
@@ -286,13 +394,10 @@
     const prevIdx = cards.findIndex(c => c.classList.contains("sel"));
     cards.forEach((c, i) => c.classList.toggle("sel", i === idx));
     const res = await API.setBackend(idx);
-    if (res && res.reloading) {
-      backendMsg("正在重新載入 CPU（OpenVINO）核心…完成後狀態燈會恢復就緒。", "info");
-    } else if (res && res.message) {
-      backendMsg(res.message, res.ok ? "info" : "warn");
-      if (res.ok === false && prevIdx >= 0) {           // GPU 核心未接通 → 視覺退回原選
-        cards.forEach((c, i) => c.classList.toggle("sel", i === prevIdx));
-      }
+    // 切換核心 = 持久化選擇 + 請重啟（不熱重載）。選擇保留以反映已記住的核心。
+    if (res && res.message) {
+      const warn = !!res.restartRequired && res.backend !== "openvino";
+      backendMsg(res.message, warn ? "warn" : "info");
     } else {
       backendMsg("", null);
     }

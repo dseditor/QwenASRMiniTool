@@ -53,6 +53,8 @@
 /* ── 重置 ─────────────────────────────────── */
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
+/* hidden 屬性必須勝過 .banner/.rec-live-wave 等 display:flex 類別（否則 el.hidden 無效）*/
+[hidden] { display: none !important; }
 body {
   font-family: var(--font-ui);
   color: var(--ink);

@@ -35,12 +35,19 @@ from webview_backend import WebBackend
 
 
 def resolve_web_dir() -> Path:
-    """webview/ 目錄：原始碼執行用專案目錄；PyInstaller 凍結時用 _MEIPASS。"""
+    """前端資產目錄：原始碼用專案 webview/；PyInstaller 凍結時用 _MEIPASS。
+
+    凍結時刻意放在 `webview_assets/`，避免與 pywebview 套件本身的
+    `webview/` 目錄在 _internal/ 撞名混在一起（兩者皆名為 webview）。
+    """
     if getattr(sys, "frozen", False):
         base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
-    else:
-        base = Path(__file__).resolve().parent
-    return base / "webview"
+        for name in ("webview_assets", "webview"):     # 優先乾淨的 webview_assets
+            d = base / name
+            if (d / "index.html").is_file():
+                return d
+        return base / "webview_assets"
+    return Path(__file__).resolve().parent / "webview"
 
 
 WEB_DIR = resolve_web_dir()

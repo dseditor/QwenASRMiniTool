@@ -100,10 +100,21 @@ class WebBackend:
             "loading": self._loading,
             "error": self._load_err,
             "backend": "CPU · OpenVINO INT8",
+            "backendKey": self._persisted_backend(),       # 已記住的核心選擇
+            "activeBackend": getattr(self, "_active_backend", "openvino"),  # 實際載入中的核心
             "device": "CPU",
             "version": self._app_version(),
             "appName": "聲音辨識",
         }
+
+    def _persisted_backend(self) -> str:
+        try:
+            f = getattr(core, "SETTINGS_FILE", BASE_DIR / "settings.json")
+            if Path(f).exists():
+                return json.loads(Path(f).read_text(encoding="utf-8")).get("backend", "openvino")
+        except Exception:
+            pass
+        return "openvino"
 
     def _app_version(self) -> str:
         try:

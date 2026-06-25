@@ -23,7 +23,7 @@ webview/
 |---|---|
 | `webview_backend.py` | 與視窗/傳輸無關的業務邏輯（status/settings/devices/endpoint/transcribe），重用 ASREngine |
 | `webview_server.py`  | stdlib HTTP：serve 本資料夾 + `/api/*` + SSE `/api/events`；只綁 127.0.0.1 |
-| `app_webview.py`     | 起 server → 背景載入模型 → Edge `--app` 開窗（fallback 預設瀏覽器）→ 等關閉收 server |
+| `app_webview.py`     | 起 server → 背景載入模型 → 原生 WebView2 視窗（pywebview 只載入網址、**無 js_api**；fallback Edge `--app --inprivate` → 預設瀏覽器）→ 等關閉收 server |
 
 ## bridge.js 傳輸偵測
 

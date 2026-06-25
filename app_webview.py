@@ -1,15 +1,13 @@
-"""app_webview.py — 桌面 WebView 啟動器（本機 HTTP 伺服器 + Edge --app 視窗）
+"""app_webview.py — 桌面 WebView 啟動器（本機 HTTP server + 原生 WebView2 視窗）
 
-架構（與 Eel / flaskwebgui 同類，但零第三方相依、純標準庫，方便 PyInstaller
-打包，亦與既有 api_server.py 一致）：
-  1. 起本機伺服器 webview_server（只綁 127.0.0.1，外部連不到）
-  2. 背景載入 ASR 模型
-  3. 用 Microsoft Edge 的 --app 模式開「無網址列」視窗指向本機網址
-     （找不到 Edge → fallback 開預設瀏覽器）
-  4. 等視窗（Edge 程序）關閉 → 收掉伺服器 → 結束
+視窗用 pywebview 開「只載入本機網址」的原生 WebView2 視窗：系統內建
+WebView2 runtime（不打包 Chromium → EXE 小）、原生標題列、無瀏覽器感、
+無登入提示。前端完全透過 HTTP/SSE 與 server 溝通，**不使用 pywebview 的
+js_api** —— 那一層（pythonnet 序列化 .NET 物件）正是先前踩到無限遞迴
+死鎖的元兇；改成純載入網址後視窗穩定（實測無遞迴、視窗持續存活）。
 
-刻意不使用 pywebview：其 Windows EdgeChromium 後端（pythonnet）在本機有
-無限遞迴 bug，且在 EXE 內需額外打包 .NET 相依，是不必要的風險來源。
+啟動順序：起本機 server(只綁 127.0.0.1) → 背景載入模型 → 開原生視窗。
+WebView2 不可用時 fallback：系統 Edge --app 無痕視窗 → 再不行開預設瀏覽器。
 """
 from __future__ import annotations
 
@@ -26,22 +24,35 @@ APP_NAME = "聲音辨識"
 WIN_W, WIN_H = 1180, 820
 
 
-# ── 尋找 Microsoft Edge ────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════
+# 主要：原生 WebView2 視窗（pywebview，只載入網址、無 js_api）
+# ════════════════════════════════════════════════════════
+def run_native_window(url: str) -> bool:
+    """以原生 WebView2 視窗載入 url，阻塞至關窗回 True；不可用/失敗回 False。"""
+    try:
+        import webview
+    except Exception:
+        return False
+    try:
+        webview.create_window(
+            APP_NAME, url=url,
+            width=WIN_W, height=WIN_H, min_size=(960, 680),
+        )
+        webview.start()        # 阻塞至視窗關閉（在主執行緒）
+        return True
+    except Exception as e:
+        print(f"[{APP_NAME}] 原生視窗失敗，改用 Edge：{e}")
+        return False
+
+
+# ════════════════════════════════════════════════════════
+# Fallback：系統 Microsoft Edge --app 無痕視窗
+# ════════════════════════════════════════════════════════
 def _find_edge() -> str | None:
-    candidates = [
-        Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"))
-        / "Microsoft/Edge/Application/msedge.exe",
-        Path(os.environ.get("PROGRAMFILES", r"C:\Program Files"))
-        / "Microsoft/Edge/Application/msedge.exe",
-        Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft/Edge/Application/msedge.exe",
-    ]
-    for c in candidates:
-        if c and Path(c).is_file():
-            return str(c)
-    # 退而求其次：找 Chrome
     for c in [
-        Path(os.environ.get("PROGRAMFILES", "")) / "Google/Chrome/Application/chrome.exe",
-        Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Google/Chrome/Application/chrome.exe",
+        Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")) / "Microsoft/Edge/Application/msedge.exe",
+        Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "Microsoft/Edge/Application/msedge.exe",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft/Edge/Application/msedge.exe",
     ]:
         if c and Path(c).is_file():
             return str(c)
@@ -49,50 +60,45 @@ def _find_edge() -> str | None:
 
 
 def _profile_dir() -> str:
-    """Edge --app 專屬 user-data-dir：固定路徑 → 記住視窗大小/位置，且強制獨立實例
-    （讓我們能等這個程序結束來判定視窗關閉）。"""
     base = Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP_NAME / "edge-profile"
     base.mkdir(parents=True, exist_ok=True)
     return str(base)
 
 
-def open_window(url: str) -> subprocess.Popen | None:
-    """以 Edge --app 開無框視窗；回傳該程序（供等待關閉）。找不到 → 開預設瀏覽器回 None。"""
+def open_edge_app(url: str) -> subprocess.Popen | None:
     edge = _find_edge()
     if edge:
         args = [
-            edge,
-            f"--app={url}",
+            edge, f"--app={url}", "--inprivate",
             f"--user-data-dir={_profile_dir()}",
             f"--window-size={WIN_W},{WIN_H}",
-            "--no-first-run",
-            "--no-default-browser-check",
+            "--no-first-run", "--no-default-browser-check", "--disable-sync",
+            "--disable-background-networking",
+            "--disable-features=msImplicitSignin,msEdgeSyncEnabled,msEdgeWelcomePage,EdgeFollowEnabled",
         ]
-        # 隱藏可能的主控台旗標（凍結環境）
-        flags = 0x08000000 if sys.platform == "win32" else 0   # CREATE_NO_WINDOW
+        flags = 0x08000000 if sys.platform == "win32" else 0
         try:
             return subprocess.Popen(args, creationflags=flags)
         except Exception:
             pass
-    # fallback：預設瀏覽器（有網址列，但保證能開）
     webbrowser.open(url)
     return None
 
 
 def main():
-    srv = WebViewServer(host="127.0.0.1", port=0)   # port=0 → 自動挑空閒埠
+    srv = WebViewServer(host="127.0.0.1", port=0)   # 隨機空閒埠，只綁回環
     srv.start()
     srv.backend.start_load()                        # 背景載入模型
     url = srv.url
     print(f"[{APP_NAME}] {url}")
 
-    proc = open_window(url)
-
     try:
-        if proc is not None:
-            proc.wait()                              # 等 Edge 視窗關閉
-        else:
-            threading.Event().wait()                 # fallback：無從偵測關閉，常駐
+        if not run_native_window(url):              # 主要：原生 WebView2 視窗
+            proc = open_edge_app(url)               # fallback：Edge --app 無痕
+            if proc is not None:
+                proc.wait()
+            else:
+                threading.Event().wait()
     except KeyboardInterrupt:
         pass
     finally:

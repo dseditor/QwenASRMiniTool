@@ -3,8 +3,10 @@
 
 # GUI
 customtkinter>=5.2.0
-# WebView 版介面：純標準庫本機 HTTP 伺服器 + 系統 Edge --app 開窗，
-# 無第三方相依（不用 pywebview，避其 pythonnet 在 Windows 的遞迴 bug）。
+# WebView 版介面：原生 WebView2 視窗（系統 runtime，不打包 Chromium）。
+# 僅用 pywebview「載入本機網址」開窗，不使用其 js_api（避開 pythonnet
+# 序列化的遞迴 bug）；前端與本機 HTTP server 走 HTTP/SSE 溝通。
+pywebview>=6.0
 
 # 推理引擎
 openvino>=2024.0.0

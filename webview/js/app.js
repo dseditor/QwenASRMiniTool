@@ -368,9 +368,9 @@
   // ════════════════════════════════════════════════════════
   // 模型與裝置
   // ════════════════════════════════════════════════════════
-  const BK_IDX = { openvino: 0, chatllm: 1, crisp: 2 };
-  const BK_LABEL = { openvino: "CPU · OpenVINO INT8", chatllm: "GPU · chatllm Vulkan", crisp: "GPU · Whisper / Breeze-ASR" };
-  const BK_SHORT = { openvino: "CPU(OpenVINO)", chatllm: "chatllm", crisp: "Whisper/Breeze" };
+  const BK_IDX = { openvino: 0, chatllm: 1, crispasr: 2 };
+  const BK_LABEL = { openvino: "CPU · OpenVINO INT8", chatllm: "GPU · chatllm Vulkan", crispasr: "GPU · Whisper / Breeze-ASR" };
+  const BK_SHORT = { openvino: "CPU(OpenVINO)", chatllm: "chatllm", crispasr: "Whisper/Breeze" };
 
   async function renderModel() {
     // 反映「已記住的核心」：選中對應卡片；若與實際載入中不同 → 提示需重啟

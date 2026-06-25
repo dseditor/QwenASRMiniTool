@@ -78,31 +78,166 @@ class WebBackend:
         threading.Thread(target=self._load_worker, name="model-loader", daemon=True).start()
 
     def _load_worker(self):
+        # 依 settings.backend 全新載入對應引擎。因「切換=重啟」，每次啟動只載入
+        # 一個核心、且為全新行程，天然避開 chatllm Vulkan 雙 context 切換當機。
+        backend = self._persisted_backend()           # openvino / chatllm / crispasr
         try:
-            # webview 目前僅就地載入 OpenVINO；GPU 核心(chatllm/crisp)的載入仍
-            # 開發中，故不論 settings.backend 為何，先以 CPU(OpenVINO) 啟動。
-            self.engine.load(device="CPU", model_dir=core._DEFAULT_MODEL_DIR,
-                             cb=lambda m: self._emit("progress", {"pct": 0, "status": m}))
+            if backend == "chatllm":
+                self._load_chatllm()
+            elif backend == "crispasr":
+                self._load_crispasr()
+            else:
+                backend = "openvino"
+                self._load_openvino()
             self._loaded = True
-            self._active_backend = "openvino"
+            self._active_backend = backend
             self._emit("status", {"modelReady": True})
         except Exception as e:
-            self._load_err = str(e)
             traceback.print_exc()
+            head = str(e).splitlines()[0][:110] if str(e) else type(e).__name__
+            # GPU 核心載入失敗 → 退回 CPU(OpenVINO)，但明確告知(非靜默回退)
+            if backend != "openvino":
+                self._emit("progress", {"pct": 0, "status": f"{backend} 載入失敗，改用 CPU 核心…"})
+                try:
+                    self._load_openvino()
+                    self._loaded = True
+                    self._active_backend = "openvino"
+                    self._load_err = f"{backend} 核心載入失敗，已退回 CPU(OpenVINO)：{head}"
+                    self._emit("status", {"modelReady": True, "error": self._load_err})
+                    return
+                except Exception:
+                    traceback.print_exc()
+            self._load_err = str(e)
             self._emit("status", {"modelReady": False, "error": str(e)})
         finally:
             self._loading = False
 
+    # ── 各核心載入（重用既有引擎類別與 downloader）─────────────
+    def _settings_raw(self) -> dict:
+        try:
+            f = getattr(core, "SETTINGS_FILE", BASE_DIR / "settings.json")
+            return json.loads(Path(f).read_text(encoding="utf-8")) if Path(f).exists() else {}
+        except Exception:
+            return {}
+
+    def _vk_device_id(self, s: dict) -> int:
+        import re
+        m = re.search(r"GPU:(\d+)", s.get("device", "") or "")
+        return int(m.group(1)) if m else 0
+
+    def _dl_progress(self, *a):
+        """下載進度回呼（容忍 progress_cb(frac) 或 progress_cb(frac, msg)）。"""
+        frac = a[0] if a else 0
+        msg = a[1] if len(a) > 1 else "下載中…"
+        try:
+            self._emit("progress", {"pct": int(float(frac) * 100), "status": str(msg)})
+        except Exception:
+            pass
+
+    def _st(self, m):
+        self._emit("progress", {"pct": 0, "status": m})
+
+    def _load_openvino(self):
+        s = self._settings_raw()
+        model_dir = Path(s.get("model_dir", str(core._DEFAULT_MODEL_DIR)))
+        use_17b = "1.7B" in s.get("cpu_model_size", "0.6B")
+        cpu_threads = int(s.get("cpu_threads", 0) or 0)
+        if use_17b:
+            from downloader import quick_check_1p7b, download_1p7b
+            if not quick_check_1p7b(model_dir):
+                self._st("下載 1.7B 模型（約 4.3 GB）…")
+                download_1p7b(model_dir, progress_cb=self._dl_progress)
+        eng = core.ASREngine1p7B() if use_17b else core.ASREngine()
+        eng.load(device="CPU", model_dir=model_dir, cb=self._st, cpu_threads=cpu_threads)
+        self.engine = eng
+
+    def _load_chatllm(self):
+        from chatllm_engine import ChatLLMASREngine
+        s = self._settings_raw()
+        chatllm_dir = Path(s.get("chatllm_dir", str(getattr(core, "_CHATLLM_DIR", BASE_DIR / "chatllm"))))
+        default_bin = getattr(core, "_BIN_PATH", BASE_DIR / "ov_models" / "qwen3-asr-1.7b.bin")
+        model_path = Path(s.get("model_path") or s.get("gguf_path") or str(default_bin))
+        if not model_path.exists():
+            for c in (Path(s.get("model_dir", "")) / "qwen3-asr-1.7b.bin" if s.get("model_dir") else None,
+                      default_bin):
+                if c and Path(c).exists():
+                    model_path = Path(c)
+                    break
+        if not model_path.exists():
+            self._download_chatllm_bin(model_path)
+        eng = ChatLLMASREngine()
+        eng.load(model_path=model_path, chatllm_dir=chatllm_dir, n_gpu_layers=99,
+                 device_id=self._vk_device_id(s), cb=self._st)
+        self.engine = eng
+
+    def _download_chatllm_bin(self, model_path: Path):
+        import urllib.request
+        from downloader import _ssl_ctx
+        self._st("下載 chatllm 模型（~2.3 GB）…")
+        url = "https://huggingface.co/dseditor/Collection/resolve/main/qwen3-asr-1.7b.bin"
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; QwenASR)"})
+        with urllib.request.urlopen(req, context=_ssl_ctx()) as resp, \
+                open(str(model_path) + ".tmp", "wb") as out:
+            total = int(resp.headers.get("Content-Length", 0))
+            done = 0
+            while True:
+                block = resp.read(65536)
+                if not block:
+                    break
+                out.write(block)
+                done += len(block)
+                if total > 0:
+                    self._dl_progress(done / total, f"模型 {done/1048576:.0f}/{total/1048576:.0f} MB")
+        import os as _os
+        _os.replace(str(model_path) + ".tmp", str(model_path))
+
+    def _load_crispasr(self):
+        from crisp_engine import CrispWhisperEngine
+        from downloader import (quick_check_crispasr, download_crispasr_core,
+                                quick_check_breeze, download_breeze, breeze_filename,
+                                quick_check_aligner_gguf, download_aligner_gguf,
+                                aligner_gguf_filename)
+        s = self._settings_raw()
+        crispasr_dir = Path(s.get("crispasr_dir", str(BASE_DIR / "crispasr")))
+        quant = s.get("crisp_quant", "q5")
+        model_path = crispasr_dir / breeze_filename(quant)
+        fa_enabled = bool(s.get("crisp_fa", True))
+        fa_quant = s.get("crisp_fa_quant", "q5")
+
+        if not quick_check_crispasr(crispasr_dir):
+            self._st("下載 CrispASR 核心（約 27 MB）…")
+            download_crispasr_core(crispasr_dir, progress_cb=self._dl_progress)
+        if not quick_check_breeze(crispasr_dir, quant):
+            self._st(f"下載 Breeze-ASR-26 {quant.upper()} 模型…")
+            download_breeze(crispasr_dir, quant, progress_cb=self._dl_progress)
+        aligner_path = None
+        if fa_enabled:
+            if quick_check_aligner_gguf(crispasr_dir, fa_quant):
+                aligner_path = crispasr_dir / aligner_gguf_filename(fa_quant)
+            else:
+                try:
+                    self._st("下載時間軸對齊器…")
+                    download_aligner_gguf(crispasr_dir, fa_quant, progress_cb=self._dl_progress)
+                    aligner_path = crispasr_dir / aligner_gguf_filename(fa_quant)
+                except Exception:
+                    aligner_path = None       # 退回 Whisper 自帶時間軸
+        eng = CrispWhisperEngine()
+        eng.load(model_path=model_path, crispasr_dir=crispasr_dir,
+                 device_id=self._vk_device_id(s), cb=self._st, aligner_path=aligner_path)
+        self.engine = eng
+
     # ── 狀態 ────────────────────────────────────────────────
     def get_status(self) -> dict:
+        active = getattr(self, "_active_backend", "openvino")
         return {
             "modelReady": bool(getattr(self.engine, "ready", False)),
             "loading": self._loading,
             "error": self._load_err,
-            "backend": "CPU · OpenVINO INT8",
+            "backend": self._BACKEND_LABELS.get(active, "CPU · OpenVINO INT8"),
             "backendKey": self._persisted_backend(),       # 已記住的核心選擇
-            "activeBackend": getattr(self, "_active_backend", "openvino"),  # 實際載入中的核心
-            "device": "CPU",
+            "activeBackend": active,                        # 實際載入中的核心
+            "device": "GPU" if active in ("chatllm", "crispasr") else "CPU",
             "version": self._app_version(),
             "appName": "聲音辨識",
         }
@@ -223,11 +358,11 @@ class WebBackend:
     #   理由：① chatllm DLL 在核心切換時 Vulkan context 未釋放會整機當機
     #   (見記憶 vulkan-dual-context-crash)；② 統一所有核心的切換行為，最安全。
     #   chatllm 保留原桌面實作以向下相容；未來全面改 casr，但切換一律需重啟。
-    _BACKENDS = {0: "openvino", 1: "chatllm", 2: "crisp"}
+    _BACKENDS = {0: "openvino", 1: "chatllm", 2: "crispasr"}
     _BACKEND_LABELS = {
         "openvino": "CPU · OpenVINO INT8",
         "chatllm":  "GPU · chatllm Vulkan",
-        "crisp":    "GPU · Whisper / Breeze-ASR",
+        "crispasr": "GPU · Whisper / Breeze-ASR",
     }
 
     def set_backend(self, idx) -> dict:
@@ -241,10 +376,10 @@ class WebBackend:
         if backend == "openvino":
             return {"ok": True, "backend": backend, "restartRequired": True,
                     "message": f"已記住「{label}」。請重新啟動程式以套用新核心。"}
-        # GPU 核心：webview 的就地載入仍開發中（且需桌面版的防當機隔離流程）
+        # GPU 核心：重啟後會全新載入（首次啟用會自動下載對應模型）
         return {"ok": True, "backend": backend, "restartRequired": True,
-                "message": (f"已記住「{label}」。GPU 核心的 WebView 載入仍在開發中——"
-                            f"目前請改用桌面版使用此核心；重新啟動後將維持 CPU 核心運行。")}
+                "message": (f"已記住「{label}」。請重新啟動程式以套用 —— "
+                            f"首次啟用該核心會在啟動時自動下載對應模型。")}
 
     def _persist_backend(self, backend: str):
         f = Path(getattr(core, "SETTINGS_FILE", BASE_DIR / "settings.json"))

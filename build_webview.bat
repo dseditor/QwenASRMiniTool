@@ -1,9 +1,16 @@
 @echo off
 REM =======================================================
-REM  Qwen3 ASR - WebView edition build (PyInstaller, onedir)
+REM  Qwen3 ASR - WebView edition build (PyInstaller, ONEFILE)
 REM
-REM  Builds app_webview.py into its own exe:
-REM    dist2\QwenASR-WebView\QwenASR-WebView.exe
+REM  Builds app_webview.py into a single-file exe:
+REM    dist2\QwenASR-WebView\QwenASR-WebView.exe   (one .exe, no _internal)
+REM
+REM  WHY ONEFILE (not onedir): with onedir, the many loose DLLs inherit
+REM  Mark-of-the-Web (MOTW) when the distributed zip is extracted (7zip /
+REM  Explorer). .NET then refuses to load MOTW-tagged assemblies, so
+REM  pythonnet/clr fails and pywebview silently falls back to Edge. Onefile
+REM  extracts its DLLs to a temp dir at runtime WITHOUT MOTW, and the user
+REM  only has to Unblock one .exe. See memory motw-onefile-packaging.
 REM
 REM  The WebView UI = local stdlib HTTP server (webview_server.py) that
 REM  serves the webview\ folder + /api, opened in a native WebView2 window
@@ -47,15 +54,17 @@ IF NOT EXIST "%SRC%\ov_models\silero_vad_v4.onnx" (
 )
 
 echo.
-echo === Step 3: Build WebView edition (onedir) ===
-IF EXIST "%SRC%\dist2\QwenASR-WebView\QwenASR-WebView.exe" DEL /Q "%SRC%\dist2\QwenASR-WebView\QwenASR-WebView.exe"
+echo === Step 3: Build WebView edition (onefile) ===
+REM Clean the whole output folder so a stale onedir _internal\ never lingers.
+IF EXIST "%SRC%\dist2\QwenASR-WebView" rmdir /S /Q "%SRC%\dist2\QwenASR-WebView"
 
 %PYTHON% -m PyInstaller ^
-    --onedir ^
+    --onefile ^
     --windowed ^
     --name "QwenASR-WebView" ^
-    --distpath "%SRC%\dist2" ^
-    --icon NONE ^
+    --distpath "%SRC%\dist2\QwenASR-WebView" ^
+    --icon "%SRC%\assets\icon.ico" ^
+    --add-data "%SRC%\assets\icon.ico;." ^
     --add-data "%OPENCC_DIR%;opencc" ^
     --add-data "%OV_PKG%;openvino" ^
     --add-data "%KNF_DIR%;kaldi_native_fbank" ^
@@ -82,14 +91,21 @@ IF EXIST "%SRC%\dist2\QwenASR-WebView\QwenASR-WebView.exe" DEL /Q "%SRC%\dist2\Q
     --add-data "%SRC%\chatllm_engine.py;." ^
     --add-data "%SRC%\diarize.py;." ^
     --add-data "%SRC%\processor_numpy.py;." ^
+    --add-data "%SRC%\cf_tunnel.py;." ^
+    --add-data "%SRC%\proc_guard.py;." ^
     --runtime-hook "%SRC%\runtime_hook_utf8.py" ^
     --collect-all webview ^
+    --collect-all pythonnet ^
+    --collect-all clr_loader ^
     --collect-data certifi ^
     --collect-all tokenizers ^
     --hidden-import certifi ^
     --hidden-import webview ^
     --hidden-import webview.platforms.edgechromium ^
+    --hidden-import webview.platforms.winforms ^
+    --hidden-import clr ^
     --hidden-import clr_loader ^
+    --hidden-import pythonnet ^
     --hidden-import proxy_tools ^
     --hidden-import bottle ^
     --hidden-import app ^
@@ -118,6 +134,10 @@ IF EXIST "%SRC%\dist2\QwenASR-WebView\QwenASR-WebView.exe" DEL /Q "%SRC%\dist2\Q
     --hidden-import api_server ^
     --hidden-import endpoint_tab ^
     --hidden-import segno ^
+    --hidden-import cf_tunnel ^
+    --hidden-import proc_guard ^
+    --hidden-import diarize ^
+    --hidden-import audio_io ^
     --exclude-module torch ^
     --exclude-module torchvision ^
     --exclude-module torchaudio ^
@@ -133,17 +153,33 @@ IF NOT EXIST "%SRC%\dist2\QwenASR-WebView\QwenASR-WebView.exe" GOTO :build_faile
 
 echo.
 echo ===================================================
-echo  WebView build SUCCESS - copying chatllm + ffmpeg
+echo  WebView build SUCCESS - copying crispasr core
 echo ===================================================
-IF NOT EXIST "%SRC%\chatllm\libchatllm.dll" GOTO :after_chatllm
-xcopy "%SRC%\chatllm\*" "%SRC%\dist2\QwenASR-WebView\chatllm\" /E /I /Y /Q
-echo  chatllm/ copied
-:after_chatllm
-IF NOT EXIST "%SRC%\ffmpeg\ffmpeg.exe" GOTO :after_ffmpeg
-IF NOT EXIST "%SRC%\dist2\QwenASR-WebView\ffmpeg\" mkdir "%SRC%\dist2\QwenASR-WebView\ffmpeg\"
-xcopy "%SRC%\ffmpeg\ffmpeg.exe" "%SRC%\dist2\QwenASR-WebView\ffmpeg\" /Y /Q
-echo  ffmpeg/ copied
-:after_ffmpeg
+REM --- chatllm: intentionally NOT bundled --------------------------------
+REM The chatllm core binaries (chatllm\libchatllm.dll, main.exe, etc.) are NOT
+REM shipped. The chatllm engine module (chatllm_engine.py) is still included for
+REM backward compatibility: existing users who already have a chatllm\ folder
+REM (e.g. carried over from the CTk desktop edition) can still select and load
+REM it. The webview model list / self-check only surface chatllm when
+REM libchatllm.dll is actually present on the machine.
+REM
+REM --- crispasr core: BUNDLED (exe + dll only, NO models) ----------------
+REM We ship the CrispASR core binaries so hardware detection
+REM (crispasr.exe --diagnostics) and the Vulkan GPU path work out of the box on
+REM the model page, without a first-run 27MB core download. Only .exe + .dll are
+REM copied; the large model/aligner files (*.bin, *.gguf) are NOT bundled - they
+REM download on demand when a GPU model is selected.
+IF NOT EXIST "%SRC%\crispasr\crispasr.exe" GOTO :after_crispasr
+IF NOT EXIST "%SRC%\dist2\QwenASR-WebView\crispasr\" mkdir "%SRC%\dist2\QwenASR-WebView\crispasr\"
+xcopy "%SRC%\crispasr\*.exe" "%SRC%\dist2\QwenASR-WebView\crispasr\" /Y /Q
+xcopy "%SRC%\crispasr\*.dll" "%SRC%\dist2\QwenASR-WebView\crispasr\" /Y /Q
+echo  crispasr core (exe+dll) copied
+:after_crispasr
+
+REM --- ffmpeg: NOT bundled, downloaded on demand ------------------------
+REM ffmpeg is fetched + unzipped on first video transcription from
+REM https://huggingface.co/dseditor/Collection/resolve/main/ffmpeg.zip
+REM (downloader.download_ffmpeg), so no ffmpeg.exe is copied here.
 
 echo.
 echo  Done: dist2\QwenASR-WebView\QwenASR-WebView.exe

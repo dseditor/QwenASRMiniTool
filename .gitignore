@@ -28,6 +28,7 @@ ov_models/qwen3_asr_1p7b_kv/
 ov_models/qwen3_asr_1p7b_kv_int8/
 ov_models/qwen3_asr_1p7b_kv_int8_openvino_Scripts/
 ov_models/silero_vad*.onnx
+ov_models/*.gguf
 onnx_models/
 GPUModel/
 GGUF/
@@ -35,9 +36,17 @@ ffmpeg/
 *.onnx
 *.bin
 *.xml
+*.gguf
+
+# 圖示原始生成大圖（icon.ico / icon.png 為產出物，須追蹤；原圖不追蹤）
+assets/icon_src.png
 
 # ── 允許特定 ov_models 檔案 ───────────────────────────
 !ov_models/mel_filters.npy
+
+# ── 允許程式圖示 PNG（覆寫上方 *.png 全域忽略）─────────
+!assets/icon.png
+!webview/favicon.png
 
 # ── 自動產生的設定/快取檔 ────────────────────────────
 settings.json
@@ -103,6 +112,10 @@ UI.txt
 *.png
 *.log
 *.tmp
+
+# 程式圖示 PNG 例外（必須放在 *.png 之後才生效）
+!assets/icon.png
+!webview/favicon.png
 
 # ── 允許 Readme 資料夾內的截圖 ─────────────────────────
 !Readme/*.jpg

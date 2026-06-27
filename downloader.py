@@ -379,6 +379,59 @@ def download_crispasr_core(crispasr_dir: Path, progress_cb=None):
         progress_cb(1.0, "CrispASR 核心就緒")
 
 
+# ── ffmpeg（按需下載，不隨安裝包附帶）──────────────────────────────────
+#   桌面 CTk 版走 BtbN essentials（ffmpeg_utils.FFmpegDownloadDialog）；webview /
+#   EXE 版改抓我們自備的精簡 zip（只含 ffmpeg.exe[/ffprobe.exe]），體積小、來源穩定。
+_FFMPEG_ZIP_URL = "https://huggingface.co/dseditor/Collection/resolve/main/ffmpeg.zip"
+
+
+def quick_check_ffmpeg(dest_dir: Path) -> bool:
+    """ffmpeg.exe 是否已就緒（dest_dir 根目錄或子資料夾）。"""
+    dest_dir = Path(dest_dir)
+    if (dest_dir / "ffmpeg.exe").exists():
+        return True
+    return any(dest_dir.glob("**/ffmpeg.exe"))
+
+
+def download_ffmpeg(dest_dir: Path, progress_cb=None):
+    """下載 ffmpeg.zip（HF）並解壓 ffmpeg.exe/ffprobe.exe 至 dest_dir（扁平化）。
+
+    progress_cb(pct: float, msg: str)。仿 download_crispasr_core 的流程。
+    """
+    import shutil
+    import tempfile
+    import zipfile
+
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    if progress_cb:
+        progress_cb(0.0, "下載 ffmpeg（影片音軌提取）…")
+
+    def _cb(done: int, total_b: int):
+        if progress_cb and total_b > 0:
+            progress_cb(
+                0.9 * done / total_b,
+                f"下載 ffmpeg…  {done/1_048_576:.0f} / {total_b/1_048_576:.0f} MB",
+            )
+
+    with tempfile.TemporaryDirectory() as td:
+        zpath = Path(td) / "ffmpeg.zip"
+        _download_file(_FFMPEG_ZIP_URL, zpath, progress_cb=_cb)
+        if progress_cb:
+            progress_cb(0.92, "解壓 ffmpeg…")
+        with zipfile.ZipFile(zpath) as z:
+            z.extractall(td)
+        # 扁平化：把 ffmpeg.exe / ffprobe.exe 移到 dest_dir 根目錄（忽略 zip 內層級）
+        for f in Path(td).glob("**/*"):
+            if f.is_file() and f.name.lower() in ("ffmpeg.exe", "ffprobe.exe"):
+                shutil.copy(f, dest_dir / f.name)
+
+    if not quick_check_ffmpeg(dest_dir):
+        raise RuntimeError("ffmpeg 解壓後仍找不到 ffmpeg.exe")
+    if progress_cb:
+        progress_cb(1.0, "ffmpeg 就緒")
+
+
 def quick_check_breeze(crispasr_dir: Path, quant: str) -> bool:
     """指定量化的 Breeze 模型是否存在（排除 LFS pointer）。"""
     return _file_is_real(crispasr_dir / breeze_filename(quant))
@@ -456,6 +509,57 @@ def download_aligner_gguf(crispasr_dir: Path,
             )
 
     _download_file(f"{_ALIGNER_GGUF_BASE}/{fname}", dest, progress_cb=_cb)
+    if progress_cb:
+        progress_cb(1.0, f"✅ {fname}")
+
+
+# ── Qwen3-ASR-1.7B GGUF（CrispASR -casr 後端，Qwen 核心跑在 crispasr.exe）──
+# crispasr.exe --backend qwen3-1.7b：把 Qwen3-ASR 1.7B 當作 CrispASR 的後端，
+# 走 Vulkan（Intel/AMD/NVIDIA 通吃），繁中斷句品質佳（見 crispasr-nemotron-eval）。
+# 同作者(cstr)上傳的 GGUF；crisp_engine._infer_backend 依檔名含 "1.7b" 自動推斷。
+_QWEN3_ASR_GGUF_REPO = "cstr/qwen3-asr-1.7b-GGUF"
+_QWEN3_ASR_GGUF_BASE = f"https://huggingface.co/{_QWEN3_ASR_GGUF_REPO}/resolve/main"
+_QWEN3_ASR_GGUF_FILES = {
+    "q4": "qwen3-asr-1.7b-q4_k.gguf",   # 輕量
+    "q8": "qwen3-asr-1.7b-q8_0.gguf",   # 精確
+}
+_QWEN3_ASR_GGUF_DEFAULT = "q8"
+
+
+def qwen3_asr_gguf_filename(quant: str = _QWEN3_ASR_GGUF_DEFAULT) -> str:
+    """量化代碼（q4/q8）→ Qwen3-ASR-1.7B GGUF 檔名（未知時回傳 q8 精確）。"""
+    return _QWEN3_ASR_GGUF_FILES.get(quant, _QWEN3_ASR_GGUF_FILES[_QWEN3_ASR_GGUF_DEFAULT])
+
+
+def quick_check_qwen3_asr_gguf(model_dir: Path,
+                               quant: str = _QWEN3_ASR_GGUF_DEFAULT) -> bool:
+    """指定量化的 Qwen3-ASR-1.7B GGUF 是否存在（排除 LFS pointer）。"""
+    return _file_is_real(Path(model_dir) / qwen3_asr_gguf_filename(quant))
+
+
+def download_qwen3_asr_gguf(model_dir: Path,
+                            quant: str = _QWEN3_ASR_GGUF_DEFAULT, progress_cb=None):
+    """下載指定量化的 Qwen3-ASR-1.7B GGUF 至 model_dir（通常為 ov_models/）。
+
+    progress_cb(pct: float, msg: str)。支援斷點續傳與 HF 鏡像。
+    """
+    model_dir = Path(model_dir)
+    model_dir.mkdir(parents=True, exist_ok=True)
+    fname = qwen3_asr_gguf_filename(quant)
+    dest  = model_dir / fname
+    if _file_is_real(dest):
+        if progress_cb:
+            progress_cb(1.0, f"{fname} 已存在")
+        return
+
+    def _cb(done: int, total_b: int):
+        if progress_cb and total_b > 0:
+            progress_cb(
+                done / total_b,
+                f"下載 {fname}…  {done/1_048_576:.0f} / {total_b/1_048_576:.0f} MB",
+            )
+
+    _download_file(f"{_QWEN3_ASR_GGUF_BASE}/{fname}", dest, progress_cb=_cb)
     if progress_cb:
         progress_cb(1.0, f"✅ {fname}")
 

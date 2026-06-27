@@ -168,8 +168,18 @@ class WebViewServer:
                     return self._json(server.backend.get_settings())
                 if path == "/api/devices":
                     return self._json(server.backend.list_devices())
+                if path == "/api/model-options":
+                    return self._json(server.backend.get_model_options())
+                if path == "/api/languages":
+                    return self._json(server.backend.get_languages())
                 if path == "/api/endpoint":
                     return self._json(server.backend.get_endpoint())
+                if path == "/api/health-check":
+                    return self._json(server.backend.health_check())
+                if path == "/api/tunnel":
+                    return self._json(server.backend.get_tunnel())
+                if path == "/api/qr":
+                    return self._qr(urlparse(self.path).query)
                 if path == "/api/batch":
                     return self._json(server.backend.get_batch())
                 if path == "/api/events":
@@ -189,25 +199,50 @@ class WebViewServer:
                     if path == "/api/backend":
                         return self._json(server.backend.set_backend(
                             self._read_json_body().get("index")))
+                    if path == "/api/model":
+                        body = self._read_json_body()
+                        return self._json(server.backend.set_model(
+                            body.get("core"), body.get("model")))
+                    if path == "/api/load":           # 首次選定模型 → 就地下載並載入
+                        return self._json(server.backend.request_load())
                     if path == "/api/endpoint":
                         body = self._read_json_body()
                         act = body.get("action")
                         if act == "start":
-                            return self._json(server.backend.toggle_endpoint(True))
+                            return self._json(server.backend.toggle_endpoint(True, body.get("port")))
                         if act == "stop":
                             return self._json(server.backend.toggle_endpoint(False))
                         if act == "regen":
                             return self._json(server.backend.regen_key())
                         return self._err(400, "unknown action")
+                    if path == "/api/tunnel":
+                        act = self._read_json_body().get("action")
+                        return self._json(server.backend.toggle_tunnel(act == "start"))
                     if path == "/api/transcribe":
                         return self._transcribe()
                     if path == "/api/cancel":
                         return self._json({"ok": server.backend.cancel()})
                     if path == "/api/open-output":
                         return self._json({"ok": server.backend.open_output_dir()})
+                    if path == "/api/check-update":
+                        return self._json(server.backend.open_releases())
                     return self._err(404, "unknown api")
                 except Exception as e:
                     return self._err(500, str(e))
+
+            # ── QR 圖（segno → PNG）───────────────────────────
+            def _qr(self, query):
+                from urllib.parse import parse_qs
+                data = (parse_qs(query).get("d", [""])[0] or "").strip()
+                png = server.backend.make_qr(data) if data else None
+                if not png:
+                    return self._err(404, "qr unavailable")
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(png)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(png)
 
             # ── 靜態檔 ────────────────────────────────────────
             def _static(self, path):
@@ -279,6 +314,7 @@ class WebViewServer:
 
                 opts = {
                     "path": str(in_path),
+                    "name": filename,        # 原始上傳檔名 → 輸出字幕用它命名、落 subtitles/
                     "language": (fields.get("language") or "").strip() or None,
                     "diarize": (fields.get("diarize", "") or "").lower() in ("1", "true", "on", "yes"),
                     "nSpeakers": fields.get("n_speakers", ""),
@@ -315,10 +351,12 @@ class WebViewServer:
 
 
 if __name__ == "__main__":
-    # 獨立啟動（除錯用）：起 server + 背景載入模型，印出網址。
+    # 獨立啟動（除錯用）：起 server，印出網址。只有「選擇的模型已下載」才自動
+    # 載入（與 app_webview 一致：首次/未下載 → 等使用者於模型頁按下載，避免硬抓）。
     srv = WebViewServer(port=8765)
     srv.start()
-    srv.backend.start_load()
+    if srv.backend.selected_model_present():
+        srv.backend.start_load()
     print(f"WebView server: {srv.url}")
     try:
         threading.Event().wait()

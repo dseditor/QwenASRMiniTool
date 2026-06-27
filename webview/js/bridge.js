@@ -110,6 +110,11 @@
       if (MODE === "web") { try { await apiPost("/api/open-output", {}); } catch {} return true; }
       return false;
     },
+    async checkUpdate() {
+      if (MODE === "web") { try { return await apiPost("/api/check-update", {}); } catch {} }
+      window.open("https://github.com/dseditor/QwenASRMiniTool/releases/latest", "_blank");
+      return { ok: true };
+    },
 
     async listDevices() {
       if (MODE === "web") return apiGet("/api/devices");
@@ -118,6 +123,30 @@
     async setBackend(id) {
       if (MODE === "web") return apiPost("/api/backend", { index: id });
       return true;
+    },
+    async getModelOptions() {
+      if (MODE === "web") return apiGet("/api/model-options");
+      return MOCK.modelOptions;
+    },
+    async setModel(core, model) {
+      if (MODE === "web") return apiPost("/api/model", { core, model });
+      return { ok: true, core, model, arch: "（mock）", restartRequired: false, canLoadNow: true,
+               message: `（展示模式）已選「${core} · ${model}」，點「下載並載入模型」開始` };
+    },
+    // 首次選定模型 → 就地下載並載入（進度走 SSE "progress"，完成走 "status"）
+    async startLoad() {
+      if (MODE === "web") return apiPost("/api/load", {});
+      // mock：模擬載入完成
+      setTimeout(() => { MOCK.status.modelReady = true; emit("status", { modelReady: true }); }, 1200);
+      return { ok: true, loading: true };
+    },
+    async getLanguages() {
+      if (MODE === "web") return apiGet("/api/languages");
+      return MOCK.languages;
+    },
+    async getHealthCheck() {
+      if (MODE === "web") return apiGet("/api/health-check");
+      return MOCK.health;
     },
 
     async getSettings() {
@@ -133,15 +162,34 @@
       if (MODE === "web") return apiGet("/api/endpoint");
       return MOCK.endpoint;
     },
-    async toggleEndpoint(on_) {
-      if (MODE === "web") return apiPost("/api/endpoint", { action: on_ ? "start" : "stop" });
-      MOCK.endpoint.running = on_; return MOCK.endpoint;
+    async toggleEndpoint(on_, port) {
+      if (MODE === "web") return apiPost("/api/endpoint", { action: on_ ? "start" : "stop", port });
+      MOCK.endpoint.running = on_; if (port) MOCK.endpoint.port = +port; return MOCK.endpoint;
     },
     async regenKey() {
       if (MODE === "web") return apiPost("/api/endpoint", { action: "regen" });
       MOCK.endpoint.key = "k_" + Math.random().toString(36).slice(2, 14);
       MOCK.endpoint.url = `http://${MOCK.endpoint.host}:${MOCK.endpoint.port}/?k=${MOCK.endpoint.key}`;
       return MOCK.endpoint;
+    },
+
+    // 對外臨時網址（Cloudflare）— 狀態/網址另經 SSE "tunnel" 事件即時推送
+    async getTunnel() {
+      if (MODE === "web") return apiGet("/api/tunnel");
+      return MOCK.tunnel;
+    },
+    async toggleTunnel(on_) {
+      if (MODE === "web") return apiPost("/api/tunnel", { action: on_ ? "start" : "stop" });
+      MOCK.tunnel.running = on_;
+      MOCK.tunnel.url = on_ ? "https://demo-fluffy-cloud.trycloudflare.com/?k=•••••" : "";
+      MOCK.tunnel.status = on_ ? "ready" : "";
+      setTimeout(() => emit("tunnel", MOCK.tunnel), 600);   // 模擬非同步就緒
+      return { running: on_, url: "", status: on_ ? "建立中…" : "" };
+    },
+    // QR 圖網址：web 走後端 /api/qr（segno）；mock 無後端 → 空字串（前端顯示佔位）
+    qrSrc(data) {
+      if (!data || MODE !== "web") return "";
+      return withKey("/api/qr?d=" + encodeURIComponent(data));
     },
 
     async getBatch() {
@@ -177,15 +225,63 @@
   // ════════════════════════════════════════════════════════
   const MOCK = {
     cancelled: false,
-    status: { modelReady: true, backend: "CPU · OpenVINO INT8", device: "AMD Ryzen 5 9600X", version: "1.0.9", appName: "聲音辨識" },
-    settings: { scale: 100, format: "srt", vocab: "s2twp", mirror: "", ffmpeg: "ffmpeg/ffmpeg.exe", theme: "light", uiLang: "繁體中文" },
+    status: { modelReady: true, backend: "GPU · CRISPASR（Vulkan）", device: "NVIDIA GeForce RTX", version: "webview 0.1", appName: "聲音辨識小工具", hasAnyModel: false, selectedReady: false },
+    settings: { scale: 100, format: "srt", vocab: "s2twp", mirror: "", ffmpeg: "", theme: "light", uiLang: "繁體中文", vad: 0.5 },
     endpoint: { running: true, host: "192.168.1.20", port: 11435, key: "k_8x2pf3qd7m1c", url: "" },
+    tunnel: { running: false, url: "", status: "" },
     devices: {
       devices: [
         { kind: "cpu", name: "AMD Ryzen 5 9600X 6-Core", note: "使用中" },
         { kind: "gpu", name: "NVIDIA GeForce RTX 4070", note: "8.0 GB 可用" },
       ],
-      diag: { level: "warn", text: "GPU 偵測未完成：main.exe --show_devices 逾時。已自動改用 CPU 推理；如需 GPU 請更新顯卡 / Vulkan 驅動。" },
+      diag: { level: "info", text: "（展示資料）GPU 由 CrispASR 偵測；實機會列出可用的獨立顯示卡與可用記憶體。" },
+    },
+    modelOptions: {
+      cores: [
+        { label: "Qwen", models: [
+          { label: "Qwen3-ASR-0.6B", backend: "openvino", arch: "CPU · OpenVINO INT8", note: "" },
+          { label: "Qwen3-ASR-1.7B INT8", backend: "openvino", arch: "CPU · OpenVINO INT8", note: "" },
+          { label: "Qwen3-ASR-1.7B Q4 (CRISPASR/Vulkan)", backend: "crispasr", arch: "GPU · CRISPASR（Vulkan）", note: "" },
+          { label: "Qwen3-ASR-1.7B Q8 (CRISPASR/Vulkan)", backend: "crispasr", arch: "GPU · CRISPASR（Vulkan）", note: "" },
+          { label: "Qwen3-ASR-1.7B Q8（Vulkan · 相容）", backend: "chatllm", arch: "GPU · chatllm Vulkan", note: "⚠️ chatllm 核心在部分 AMD 內顯／APU 有已知相容問題，且核心二進位未隨安裝包提供（保留供既有使用者向下相容）；若遇當機或無輸出，建議改用「Qwen · CRISPASR/Vulkan」核心。" },
+        ]},
+        { label: "Whisper (Breeze)", models: [
+          { label: "Breeze Q4 (輕量)", backend: "crispasr", arch: "GPU · CRISPASR（Vulkan）" },
+          { label: "Breeze Q5 (標準)", backend: "crispasr", arch: "GPU · CRISPASR（Vulkan）" },
+          { label: "Breeze Q8 (精確)", backend: "crispasr", arch: "GPU · CRISPASR（Vulkan）" },
+        ]},
+      ],
+      current: { core: "Qwen", model: "Qwen3-ASR-0.6B" },
+      activeArch: "CPU · OpenVINO INT8",
+    },
+    languages: {
+      languages: [
+        { label: "自動偵測", value: "" }, { label: "Chinese", value: "Chinese" },
+        { label: "English", value: "English" }, { label: "Japanese", value: "Japanese" },
+        { label: "Korean", value: "Korean" }, { label: "Cantonese", value: "Cantonese" },
+      ],
+    },
+    health: {
+      summary: { red: 0, yellow: 3, ok: true }, activeBackend: "openvino",
+      cores: [
+        { label: "Qwen · OpenVINO（CPU）", backend: "openvino", items: [
+          { key: "model", label: "ASR 模型（0.6B）", status: "green", detail: "已下載" },
+          { key: "vad", label: "語音分段 VAD（silero）", status: "green", detail: "已內建" },
+          { key: "fa", label: "時間軸對齊 FA", status: "yellow", detail: "未下載（約 939MB，啟用對齊時下載）" },
+          { key: "diar", label: "說話者分離（外部 ONNX）", status: "yellow", detail: "未下載（約 32MB，啟用分離時下載）" },
+        ]},
+        { label: "CRISPASR（Vulkan：Whisper/Breeze + Qwen）", backend: "crispasr", items: [
+          { key: "core", label: "CrispASR 核心（crispasr.exe）", status: "green", detail: "已下載" },
+          { key: "breeze", label: "Whisper/Breeze 模型（Q5）", status: "green", detail: "已下載" },
+          { key: "qwen", label: "Qwen3-ASR-1.7B 模型（Q8）", status: "yellow", detail: "未下載（啟用時下載）" },
+          { key: "fa", label: "時間軸對齊 FA（aligner gguf Q5）", status: "green", detail: "已下載" },
+          { key: "diar", label: "說話者分離（外部 ONNX，與 OpenVINO 共用）", status: "yellow", detail: "未下載" },
+        ]},
+      ],
+      shared: [
+        { key: "ffmpeg", label: "FFmpeg（影片抽音軌用）", status: "green", detail: "已偵測：C:/ffmpeg/ffmpeg.exe" },
+        { key: "diar_shared", label: "說話者分離模型（共用）", status: "yellow", detail: "未下載（啟用分離時自動下載）" },
+      ],
     },
     batch: {
       summary: { done: 3, total: 7 },

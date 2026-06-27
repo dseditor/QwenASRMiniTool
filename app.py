@@ -112,6 +112,10 @@ if getattr(sys, "frozen", False):
     BASE_DIR = Path(sys.executable).parent
 else:
     BASE_DIR = Path(__file__).parent
+# PyInstaller onefile 解壓的暫存資源根（_MEIPASS）：--add-data 進來的檔案在這裡，
+# 不在 EXE 旁。隨包附帶的小檔（如 silero_vad_v4.onnx）要從這裡找得到，否則凍結後
+# 在 BASE_DIR（EXE 旁）找不到 → VAD 載入失敗、模型永遠停在「載入 VAD…」。
+_MEIPASS_DIR = Path(getattr(sys, "_MEIPASS", "")) if getattr(sys, "frozen", False) else None
 _DEFAULT_MODEL_DIR = BASE_DIR / "ov_models"
 SETTINGS_FILE      = BASE_DIR / "settings.json"
 SRT_DIR            = BASE_DIR / "subtitles"
@@ -307,14 +311,25 @@ def _assign_ts(lines: list[str], g0: float, g1: float) -> list[tuple[float, floa
     return res
 
 
-def _find_vad_model() -> Path | None:
-    """依序在 GPUModel/ 和 ov_models/ 尋找 Silero VAD ONNX。"""
-    candidates = [
-        GPU_MODEL_DIR / "silero_vad_v4.onnx",
+def _find_vad_model(model_dir: Path | None = None) -> Path | None:
+    """尋找 Silero VAD ONNX：指定 model_dir → ov_models/ → GPUModel/ → _MEIPASS（打包）。
+
+    凍結後隨包附帶的 silero_vad_v4.onnx 位於 _MEIPASS/ov_models（--add-data），
+    故必須把它納入搜尋，否則在 EXE 旁的 ov_models/ 找不到 → VAD 載入卡死。
+    """
+    candidates: list[Path] = []
+    if model_dir is not None:
+        candidates += [Path(model_dir) / "silero_vad_v4.onnx",
+                       Path(model_dir) / "silero_vad.onnx"]
+    candidates += [
         _DEFAULT_MODEL_DIR / "silero_vad_v4.onnx",
-        GPU_MODEL_DIR / "silero_vad.onnx",
+        GPU_MODEL_DIR / "silero_vad_v4.onnx",
         _DEFAULT_MODEL_DIR / "silero_vad.onnx",
+        GPU_MODEL_DIR / "silero_vad.onnx",
     ]
+    if _MEIPASS_DIR is not None:
+        candidates += [_MEIPASS_DIR / "ov_models" / "silero_vad_v4.onnx",
+                       _MEIPASS_DIR / "silero_vad_v4.onnx"]
     for p in candidates:
         if p.exists():
             return p
@@ -549,11 +564,15 @@ class ASREngine:
             cpu_cfg["ENABLE_HYPER_THREADING"] = "YES"
             if cpu_threads > 0:
                 cpu_cfg["INFERENCE_NUM_THREADS"] = str(cpu_threads)
-        vad_path = model_dir / "silero_vad_v4.onnx"
+        # VAD 路徑：含 _MEIPASS（打包）等多處搜尋，凍結後才找得到隨包附帶的 onnx。
+        vad_path = _find_vad_model(model_dir)
 
         def _s(msg):
             if cb: cb(msg)
 
+        if vad_path is None:
+            raise FileNotFoundError(
+                "找不到 silero_vad_v4.onnx（VAD 模型）。請確認已隨安裝包附帶或放入 ov_models/。")
         _s("載入 VAD 模型…")
         self.vad_sess = ort.InferenceSession(
             str(vad_path), providers=["CPUExecutionProvider"]
@@ -3266,5 +3285,11 @@ class App(ctk.CTk):
 # ══════════════════════════════════════════════════════
 
 if __name__ == "__main__":
+    # 綁進 Job Object：辨識衍生的 crispasr.exe / chatllm main.exe(FA) 子程序
+    # 會自動繼承同一 Job，主行程結束（含崩潰/被強制結束）時連帶被終止，
+    # 杜絕孤兒程序殘留。與 app_webview.py 共用 proc_guard 邏輯。
+    from proc_guard import setup_kill_on_close_job
+    setup_kill_on_close_job()
+
     app = App()
     app.mainloop()

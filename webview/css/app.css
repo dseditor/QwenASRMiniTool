@@ -50,6 +50,38 @@
   --side-w: 88px;
 }
 
+/* ── 深色主題：覆寫色彩 token（其餘版面共用，因全站走 var()）──────────
+   由 JS 依設定把 data-theme="dark" 掛到 <html>；system 模式會解析成 light/dark。
+   視窗標題列另由 app_webview 依同一設定同步深淺（DWM）。 */
+:root[data-theme="dark"] {
+  --paper:        #15161A;
+  --panel:        #1E2026;
+  --panel-2:      #191A1F;
+  --ink:          #ECEDEF;
+  --ink-2:        #C6C7CC;
+  --muted:        #9597A0;
+  --faint:        #6A6C75;
+  --line:         #2C2E36;
+  --line-strong:  #3A3D47;
+
+  --accent:       #18A892;
+  --accent-strong:#13917D;
+  --accent-soft:  #14322D;
+  --accent-tint:  #122220;
+
+  --live:         #FF5C61;
+  --live-soft:    #3A1F21;
+  --ok:           #2BB070;
+  --ok-soft:      #15321F;
+
+  --warn-bg:      #2E2716;
+  --warn-fg:      #E6B968;
+  --warn-line:    #4A3E20;
+
+  --shadow-sm: 0 1px 2px rgba(0,0,0,.35);
+  --shadow:    0 1px 2px rgba(0,0,0,.30), 0 6px 18px rgba(0,0,0,.40);
+}
+
 /* ── 重置 ─────────────────────────────────── */
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
@@ -110,8 +142,8 @@ button { font-family: inherit; }
 .brand .logo svg { width: 22px; height: 22px; }
 .brand .name {
   font-family: var(--font-disp);
-  font-size: 12.5px; font-weight: 600; letter-spacing: .3px;
-  color: var(--ink-2);
+  font-size: 11px; font-weight: 600; letter-spacing: .2px;
+  color: var(--ink-2); white-space: nowrap;
 }
 
 .nav { display: flex; flex-direction: column; gap: 3px; margin-top: 8px; }
@@ -312,9 +344,13 @@ textarea.input { resize: vertical; min-height: 64px; font-size: 13px; line-heigh
    Signature：波形 + 時間軸字幕卡
    ============================================================ */
 .result { margin-top: 22px; }
+/* 波形＋播放控制常駐：捲動字幕時釘在捲動容器（.view-host）頂端，
+   像歌詞播放器一樣保持波形/播放頭/播放鈕可見。面板為不透明背景，
+   字幕由下方滑過不會穿透。 */
 .wave-panel {
   background: var(--panel); border: 1px solid var(--line);
   border-radius: var(--r-card); padding: 16px 18px; box-shadow: var(--shadow-sm);
+  position: sticky; top: 0; z-index: 5;
 }
 .wave {
   position: relative; height: 76px; display: flex; align-items: center;
@@ -357,6 +393,10 @@ textarea.input { resize: vertical; min-height: 64px; font-size: 13px; line-heigh
 }
 .play-btn:hover { background: var(--accent-strong); }
 .play-btn svg { width: 15px; height: 15px; }
+/* 停止：次要外觀（描邊），與主要播放鈕區隔 */
+.play-btn-ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+.play-btn-ghost:hover { background: var(--accent-tint); color: var(--accent-strong); border-color: var(--accent-soft); }
+.play-btn-ghost svg { width: 13px; height: 13px; }
 .play-time { font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); }
 
 .subs { margin-top: 14px; display: flex; flex-direction: column; gap: 7px; }
@@ -379,6 +419,27 @@ textarea.input { resize: vertical; min-height: 64px; font-size: 13px; line-heigh
 .spk-2 { background: #EDEAF6; color: #5B4B9A; }
 .spk-3 { background: #F6EFE3; color: #8A6312; }
 .sub-card .txt { font-size: 13.5px; color: var(--ink); line-height: 1.6; }
+
+/* 說話者外框色：左側邊框依說話者著色（與 chip 同色系），快速辨識發言者 */
+.sub-card.spkc-1 { border-left-color: var(--accent); }
+.sub-card.spkc-2 { border-left-color: #5B4B9A; }
+.sub-card.spkc-3 { border-left-color: #8A6312; }
+
+/* 行內校對：每行右側的小筆 + 編輯態 */
+.sub-edit {
+  flex: 0 0 auto; width: 26px; height: 26px; margin-top: -1px;
+  border-radius: 7px; border: 1px solid transparent; background: transparent;
+  color: var(--faint); cursor: pointer; display: grid; place-items: center;
+  opacity: 0; transition: opacity .12s, background .12s, color .12s, border-color .12s;
+}
+.sub-card:hover .sub-edit, .sub-card.editing .sub-edit { opacity: 1; }
+.sub-edit:hover { background: var(--accent-tint); color: var(--accent-strong); border-color: var(--accent-soft); }
+.sub-edit svg { width: 14px; height: 14px; }
+.sub-card.editing { background: var(--panel-2); }
+.sub-card .txt[contenteditable="true"] {
+  outline: none; background: var(--panel); border-radius: 6px;
+  padding: 2px 7px; margin: -2px -7px; box-shadow: 0 0 0 2px var(--accent-soft);
+}
 
 /* 記錄 log */
 .log {
@@ -444,6 +505,42 @@ textarea.input { resize: vertical; min-height: 64px; font-size: 13px; line-heigh
 }
 .copy-field code { flex: 1; font-family: var(--font-mono); font-size: 12.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ep-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+
+/* 系統自檢面板 */
+.health-panel { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 6px; }
+.health-core {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--r-card); padding: 12px 14px; box-shadow: var(--shadow-sm);
+}
+.hc-title { font-size: 13px; font-weight: 600; color: var(--ink); margin-bottom: 9px; }
+.hc-item { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 12px; }
+.hc-item .hi-label { color: var(--ink-2); white-space: nowrap; }
+.hc-item .hi-detail { color: var(--faint); margin-left: auto; text-align: right;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 55%; }
+.hdot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
+.hdot-green { background: #2BB673; box-shadow: 0 0 0 3px rgba(43,182,115,.15); }
+.hdot-yellow { background: #E0A53B; box-shadow: 0 0 0 3px rgba(224,165,59,.15); }
+.hdot-red { background: #D7574B; box-shadow: 0 0 0 3px rgba(215,87,75,.15); }
+@media (max-width: 760px) { .health-panel { grid-template-columns: 1fr; } }
+
+/* QR + 網址並排 */
+.qr-row { display: flex; gap: 14px; align-items: center; }
+.qr-side { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
+.qr {
+  width: 116px; height: 116px; flex: 0 0 auto; border-radius: 10px;
+  border: 1px solid var(--line); background: #fff; padding: 6px; image-rendering: pixelated;
+}
+.qr-hint { font-size: 11px; color: var(--faint); line-height: 1.5; }
+
+/* Cloudflare 對外通道 */
+.cf-warn {
+  margin-top: 11px; font-size: 11.5px; line-height: 1.6; color: #8A6312;
+  background: #FBF4E6; border: 1px solid #ECDFC8; border-radius: 8px; padding: 8px 11px;
+}
+.cf-body { margin-top: 12px; }
+.cf-status { margin-top: 9px; font-size: 11.5px; color: var(--muted); font-family: var(--font-mono); min-height: 16px; }
+.cf-status.ok { color: var(--accent-strong); }
+.cf-status.err { color: #c0392b; }
 .endpoint-line {
   font-family: var(--font-mono); font-size: 12px; color: var(--ink-2);
   background: var(--panel-2); border: 1px solid var(--line);

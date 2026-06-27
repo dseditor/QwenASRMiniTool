@@ -6,6 +6,12 @@
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const API = window.QwenAPI;
+  // i18n 取字（含 {n} 等簡單插值）；無字典或無此鍵時回退預設值 def。
+  function T(key, def, vars) {
+    let s = (window.I18N && I18N.t(key)) || def || key;
+    if (vars) for (const k in vars) s = s.replace("{" + k + "}", vars[k]);
+    return s;
+  }
 
   const VIEW_TITLES = {
     file: "音檔轉字幕", batch: "批次辨識", record: "錄製轉換",
@@ -13,13 +19,18 @@
   };
 
   // ── 導覽切換 ────────────────────────────────────────────
+  let _curView = "file";
+  function viewTitle(name) { return (window.I18N && I18N.t("view." + name)) || VIEW_TITLES[name] || ""; }
+  function refreshViewTitle() { $("#view-title").textContent = viewTitle(_curView); }
   function switchView(name) {
+    _curView = name;
     $$(".nav-item").forEach(b => b.classList.toggle("active", b.dataset.view === name));
     $$(".view").forEach(v => v.classList.toggle("active", v.dataset.view === name));
-    $("#view-title").textContent = VIEW_TITLES[name] || "";
+    $("#view-title").textContent = viewTitle(name);
     $("#view-ctx").textContent = "";
     if (name === "batch") renderBatch();
     if (name === "model") renderModel();
+    if (name === "record") { enumerateMics(); refreshMicPerm(); }   // 列舉裝置 + 麥克風權限狀態
   }
   $("#nav").addEventListener("click", e => {
     const btn = e.target.closest(".nav-item");
@@ -31,8 +42,10 @@
     const s = await API.getStatus();
     const el = $("#model-status");
     el.classList.toggle("loading", !s.modelReady);
-    $(".t", el).textContent = s.modelReady ? "模型已就緒" : "載入模型中…";
-    if (s.version) $("#app-version").textContent = "v" + s.version;
+    $(".t", el).textContent = s.modelReady ? T("status.ready", "模型已就緒")
+      : (s.loading ? T("status.loading", "載入模型中…") : T("status.needModel", "尚未載入模型"));
+    // 版本徽章：純數字版本前綴 v（如 v1.0.9）；已含文字者（如 webview 0.1）原樣顯示
+    if (s.version) $("#app-version").textContent = /^\d/.test(s.version) ? "v" + s.version : s.version;
   }
 
   // ════════════════════════════════════════════════════════
@@ -70,11 +83,18 @@
   ["dragleave", "drop"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("hot"); }));
   drop.addEventListener("drop", e => { const f = e.dataTransfer.files[0]; if (f) setFile(f); });
 
-  $("#btn-load-txt").addEventListener("click", async () => {
-    const t = await API.loadHintTxt();
-    if (t != null) $("#hint-box").value = t;
-    else alert("此模式無法開啟檔案對話框，請直接貼上文字。");
+  // 讀入 TXT：瀏覽器沙箱用隱藏 <input type=file> + FileReader 讀文字進提示框
+  const _txtInput = document.createElement("input");
+  _txtInput.type = "file"; _txtInput.accept = ".txt,text/plain"; _txtInput.style.display = "none";
+  document.body.appendChild(_txtInput);
+  _txtInput.addEventListener("change", () => {
+    const f = _txtInput.files && _txtInput.files[0]; if (!f) return;
+    const r = new FileReader();
+    r.onload = () => { $("#hint-box").value = String(r.result || ""); };
+    r.readAsText(f, "utf-8");
+    _txtInput.value = "";
   });
+  $("#btn-load-txt").addEventListener("click", () => _txtInput.click());
 
   // 轉錄
   let running = false;
@@ -89,7 +109,7 @@
     try {
       const res = await API.transcribe({
         path: picked.path, file: picked.file || picked,
-        language: null,
+        language: $("#sel-lang").value || null,
         diarize: $("#sw-diar").checked,
         nSpeakers: $("#sel-spk").value,
         align: $("#sw-align").checked,
@@ -98,6 +118,7 @@
       renderResult(res.segments);
       logLine("✓ 完成，共 " + res.segments.length + " 段" + (res.srtPath ? "，已輸出 " + res.srtPath : ""));
       $("#btn-open-dir").disabled = false;
+      $("#btn-save-sub").disabled = false;
     } catch (err) {
       showProgress(0, "");
       $("#progress").hidden = true;
@@ -109,9 +130,11 @@
     }
   });
 
-  // 進度分派：批次執行中 → 更新當前批次列；否則 → 單檔進度條
+  // 進度分派：模型就地載入中 → 模型頁進度；批次執行中 → 當前批次列；否則 → 單檔進度條
   API.on("progress", ({ pct, status }) => {
-    if (batchRunning && batchActiveIdx >= 0) {
+    if (_modelLoading) {
+      setModelProg(pct, status);
+    } else if (batchRunning && batchActiveIdx >= 0) {
       batchItems[batchActiveIdx].progress = pct / 100;
       updateBatchRow(batchActiveIdx);
     } else {
@@ -160,7 +183,17 @@
     renderSegStrip(segments, waveDur);
     renderSubs(segments);
     wireAudio();
+    syncStickyOffset();
   }
+
+  // 波形面板為 sticky 釘在頂端 → 捲動容器需保留等高的頂部空間，
+  // 否則 scrollIntoView 自動捲到的字幕卡會被面板遮住。
+  function syncStickyOffset() {
+    const panel = $(".wave-panel"), host = $(".view-host");
+    if (!panel || !host) return;
+    host.style.scrollPaddingTop = (panel.offsetHeight + 12) + "px";
+  }
+  window.addEventListener("resize", syncStickyOffset);
 
   // 真實峰值：每桶取絕對值最大，整體正規化
   function computePeaks(buf, n) {
@@ -214,12 +247,56 @@
   }
   function subCard(s, idx) {
     const el = document.createElement("div");
-    el.className = "sub-card"; el.dataset.seg = idx;
+    // spkc-N：依說話者標示左側外框色（與 chip 同色系，不污染卡片背景）
+    el.className = "sub-card" + (s.speaker ? " spkc-" + (((s.speaker - 1) % 3) + 1) : "");
+    el.dataset.seg = idx;
     const spk = s.speaker ? `<span class="chip spk-${((s.speaker - 1) % 3) + 1}">說話者 ${s.speaker}</span>` : "";
     el.innerHTML = `<span class="tc">${fmtClock(s.start)} → ${fmtClock(s.end)}</span>
-      <div class="body"><div class="spk">${spk}</div><div class="txt">${escapeHtml(s.text)}</div></div>`;
-    el.addEventListener("click", () => seekTo(s.start));
+      <div class="body"><div class="spk">${spk}</div><div class="txt">${escapeHtml(s.text)}</div></div>
+      <button class="sub-edit" title="編輯此行" aria-label="編輯此行">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+      </button>`;
+    el.addEventListener("click", e => {
+      if (e.target.closest(".sub-edit") || el.classList.contains("editing")) return;
+      seekTo(s.start);
+    });
+    el.querySelector(".sub-edit").addEventListener("click", e => { e.stopPropagation(); beginEdit(el, idx); });
     return el;
+  }
+
+  // 行內校對：筆 → 該行可編輯，Enter 儲存 / Esc 取消；同步回 curSegs 與波形對齊區塊。
+  // curSegs 為下載字幕的資料來源，故編輯後存檔即反映校對結果。
+  function beginEdit(card, idx) {
+    if (card.classList.contains("editing")) return;
+    card.classList.add("editing");
+    const txt = card.querySelector(".txt");
+    const orig = curSegs[idx].text;
+    txt.contentEditable = "true"; txt.spellcheck = false;
+    txt.focus();
+    const range = document.createRange(); range.selectNodeContents(txt);
+    const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
+    function finish(save) {
+      txt.removeEventListener("keydown", onKey);
+      txt.removeEventListener("blur", onBlur);
+      txt.contentEditable = "false";
+      card.classList.remove("editing");
+      const val = (txt.textContent || "").trim();
+      if (save && val && val !== orig) {
+        curSegs[idx].text = val; txt.textContent = val;
+        const blk = $(`.seg-block[data-seg="${idx}"]`);
+        if (blk) { blk.textContent = val; blk.title = val; }
+      } else {
+        txt.textContent = orig;               // 取消或清空 → 還原
+      }
+      txt.blur();
+    }
+    function onKey(e) {
+      if (e.key === "Enter") { e.preventDefault(); finish(true); }
+      else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+    }
+    function onBlur() { finish(true); }
+    txt.addEventListener("keydown", onKey);
+    txt.addEventListener("blur", onBlur);
   }
 
   // ── 播放接線 ────────────────────────────────────────────
@@ -238,6 +315,9 @@
       seekTo(Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * waveDur);
     };
     if (play) play.onclick = () => { if (!audioEl) return; audioEl.paused ? audioEl.play() : audioEl.pause(); };
+    // 停止：暫停並回到開頭（像播放器的 stop）
+    const stop = $("#wave-stop");
+    if (stop) stop.onclick = () => { if (!audioEl) return; audioEl.pause(); audioEl.currentTime = 0; onTime(); };
 
     function onTime() {
       const t = audioEl.currentTime, ratio = waveDur ? t / waveDur : 0;
@@ -267,6 +347,43 @@
   }
 
   $("#btn-open-dir").addEventListener("click", () => API.openOutputDir());
+
+  // ── 字幕存檔：由記憶體中的 curSegs 在前端組檔，下載到使用者指定位置 ──
+  //   （瀏覽器沙箱不暴露來源檔真實路徑，無法寫回來源資料夾，故走下載。
+  //    SRT/TXT 格式比照 subtitle_lines，含「說話者N：」前綴。）
+  function srtTs(s) {
+    const ms = Math.round(s * 1000);
+    const h = String(Math.floor(ms / 3600000)).padStart(2, "0");
+    const m = String(Math.floor((ms % 3600000) / 60000)).padStart(2, "0");
+    const sec = String(Math.floor((ms % 60000) / 1000)).padStart(2, "0");
+    return `${h}:${m}:${sec},${String(ms % 1000).padStart(3, "0")}`;
+  }
+  function buildSrt(segs) {
+    return segs.map((s, i) => {
+      const spk = s.speaker ? `說話者${s.speaker}：` : "";
+      return `${i + 1}\n${srtTs(s.start)} --> ${srtTs(s.end)}\n${spk}${s.text}\n`;
+    }).join("\n");
+  }
+  function buildTxt(segs) {
+    return segs.some(s => s.speaker)
+      ? segs.map(s => (s.speaker ? `說話者${s.speaker}：` : "") + s.text).join("\n")
+      : segs.map(s => s.text).join("");
+  }
+  async function saveSubtitle() {
+    if (!curSegs.length) return;
+    let fmt = "srt";
+    try { fmt = (await API.getSettings()).format || "srt"; } catch (e) {}
+    const text = fmt === "txt" ? buildTxt(curSegs) : buildSrt(curSegs);
+    const base = (picked && picked.name) ? picked.name.replace(/\.[^.]+$/, "") : "字幕";
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = base + (fmt === "txt" ? ".txt" : ".srt");
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    logLine("✓ 已存檔字幕：" + a.download);
+  }
+  $("#btn-save-sub").addEventListener("click", saveSubtitle);
 
   // ── 記錄 ────────────────────────────────────────────────
   function logLine(msg) {
@@ -350,8 +467,8 @@
       renderBatch();
       try {
         const res = await API.transcribe({
-          file: it.file, language: null,
-          diarize: $("#sw-diar").checked, nSpeakers: $("#sel-spk").value,
+          file: it.file, language: $("#sel-lang").value || null,
+          diarize: $("#sw-batch-diar").checked, nSpeakers: $("#sel-batch-spk").value,
           align: $("#sw-align").checked, hint: "",
         });
         it.status = "done"; it.progress = 1; it.srtPath = res.srtPath;
@@ -366,23 +483,58 @@
   }
 
   // ════════════════════════════════════════════════════════
-  // 模型與裝置
+  // 模型與裝置（核心 + 模型下拉 + 架構標籤）
   // ════════════════════════════════════════════════════════
-  const BK_IDX = { openvino: 0, chatllm: 1, crispasr: 2 };
-  const BK_LABEL = { openvino: "CPU · OpenVINO INT8", chatllm: "GPU · chatllm Vulkan", crispasr: "GPU · Whisper / Breeze-ASR" };
-  const BK_SHORT = { openvino: "CPU(OpenVINO)", chatllm: "chatllm", crispasr: "Whisper/Breeze" };
+  let _modelOpt = null;     // 最近一次 getModelOptions 結果
+  let _curCore = null;      // 目前選中的核心標籤
+
+  // ── 系統自檢：每核心 × 每能力，顯示 Green/Yellow/Red ──────────────
+  async function renderHealth() {
+    let h;
+    try { h = await API.getHealthCheck(); } catch (e) { return; }
+    const sum = $("#health-sum");
+    if (h.summary) {
+      if (h.summary.red > 0) { sum.className = "chip chip-live"; sum.textContent = `${h.summary.red} 項需處理`; }
+      else if (h.summary.yellow > 0) { sum.className = "chip chip-accent"; sum.textContent = `核心就緒 · ${h.summary.yellow} 項將於啟用時自動下載`; }
+      else { sum.className = "chip chip-ok"; sum.textContent = "全部就緒"; }
+    }
+    const host = $("#health-panel"); host.innerHTML = "";
+    const dot = s => `<span class="hdot hdot-${s}"></span>`;
+    const groups = [...(h.cores || [])];
+    if (h.shared && h.shared.length) groups.push({ label: "共用元件", items: h.shared });
+    groups.forEach(g => {
+      const card = document.createElement("div"); card.className = "health-core";
+      const active = g.backend && g.backend === h.activeBackend;
+      card.innerHTML = `<div class="hc-title">${escapeHtml(g.label)}` +
+        (active ? ` <span class="chip chip-ok" style="font-size:10px">使用中</span>` : ``) + `</div>`;
+      (g.items || []).forEach(it => {
+        const row = document.createElement("div"); row.className = "hc-item";
+        row.innerHTML = `${dot(it.status)}<span class="hi-label">${escapeHtml(it.label)}</span>` +
+          `<span class="hi-detail">${escapeHtml(it.detail || "")}</span>`;
+        card.appendChild(row);
+      });
+      host.appendChild(card);
+    });
+  }
+  $("#btn-health-recheck") && $("#btn-health-recheck").addEventListener("click", renderHealth);
 
   async function renderModel() {
-    // 反映「已記住的核心」：選中對應卡片；若與實際載入中不同 → 提示需重啟
+    renderHealth();
+    // 核心卡 + 模型下拉
     try {
-      const st = await API.getStatus();
-      const sel = BK_IDX[st.backendKey] ?? 0;
-      $$(".radio-card", $("#backend-cards")).forEach((c, i) => c.classList.toggle("sel", i === sel));
-      if (st.backendKey && st.activeBackend && st.backendKey !== st.activeBackend) {
-        backendMsg(`已記住「${BK_LABEL[st.backendKey] || st.backendKey}」核心，將於重新啟動後套用`
-          + `（目前以 ${BK_SHORT[st.activeBackend] || st.activeBackend} 運行）。`, "info");
-      } else { backendMsg("", null); }
+      _modelOpt = await API.getModelOptions();
+      _curCore = _modelOpt.current.core;
+      renderCoreCards();
+      populateModels(_curCore, _modelOpt.current.model);
+      // 已記住的選擇 vs 實際載入的架構不同 → 提示重啟
+      const curArch = selectedArch();
+      if (_modelOpt.activeArch && curArch && _modelOpt.activeArch !== curArch) {
+        modelMsg(`已記住「${_curCore} · ${$("#model-select").value}」（${curArch}），`
+          + `將於重新啟動後套用（目前以 ${_modelOpt.activeArch} 運行）。`, "info");
+      } else modelMsg("", null);
+      updateLoadBtn();              // 設定「下載並載入／前往轉錄」按鈕初始狀態
     } catch (e) {}
+    // 偵測裝置 + 診斷
     const d = await API.listDevices();
     const host = $("#dev-list"); host.innerHTML = "";
     d.devices.forEach(dev => {
@@ -400,31 +552,131 @@
       const txt = diag.querySelector("div"); if (txt) txt.innerHTML = escapeHtml(d.diag.text);
     } else diag.hidden = true;
   }
-  $("#backend-cards").addEventListener("click", async e => {
+
+  function coreObj(label) {
+    const cs = _modelOpt && _modelOpt.cores || [];
+    return cs.find(c => c.label === label) || cs[0];
+  }
+  function renderCoreCards() {
+    const host = $("#core-cards"); host.innerHTML = "";
+    (_modelOpt.cores || []).forEach(core => {
+      const card = document.createElement("label");
+      card.className = "radio-card" + (core.label === _curCore ? " sel" : "");
+      card.dataset.core = core.label;
+      card.innerHTML = `<span class="rd"></span><div class="info">
+        <div class="t">${escapeHtml(core.label)}</div>
+        <div class="d">${escapeHtml(T("model.nModels", `${core.models.length} 種模型可選`, { n: core.models.length }))}</div></div>`;
+      host.appendChild(card);
+    });
+  }
+  function populateModels(coreLabel, modelLabel) {
+    const core = coreObj(coreLabel); if (!core) return;
+    const sel = $("#model-select"); sel.innerHTML = "";
+    core.models.forEach(m => {
+      const o = document.createElement("option");
+      o.value = m.label; o.textContent = m.label; o.dataset.arch = m.arch;
+      o.dataset.note = m.note || "";
+      if (m.label === modelLabel) o.selected = true;
+      sel.appendChild(o);
+    });
+    if (!core.models.some(m => m.label === modelLabel) && core.models[0]) sel.value = core.models[0].label;
+    updateArch();
+  }
+  function selectedArch() { const o = $("#model-select").selectedOptions[0]; return o ? o.dataset.arch : ""; }
+  function updateArch() {
+    const o = $("#model-select").selectedOptions[0];
+    $("#model-arch").textContent = (o && o.dataset.arch) || "";
+    const note = o && o.dataset.note, el = $("#model-note");   // chatllm AMD 等提醒
+    if (note) { el.hidden = false; el.textContent = note; } else { el.hidden = true; el.textContent = ""; }
+  }
+
+  // 點核心卡 → 切核心、模型回該核心首項並套用
+  $("#core-cards").addEventListener("click", async e => {
     const card = e.target.closest(".radio-card"); if (!card) return;
-    const cards = $$(".radio-card", $("#backend-cards"));
-    const idx = cards.indexOf(card);
-    const prevIdx = cards.findIndex(c => c.classList.contains("sel"));
-    cards.forEach((c, i) => c.classList.toggle("sel", i === idx));
-    const res = await API.setBackend(idx);
-    // 切換核心 = 持久化選擇 + 請重啟（不熱重載）。選擇保留以反映已記住的核心。
-    if (res && res.message) {
-      const warn = !!res.restartRequired && res.backend !== "openvino";
-      backendMsg(res.message, warn ? "warn" : "info");
-    } else {
-      backendMsg("", null);
-    }
+    _curCore = card.dataset.core;
+    $$(".radio-card", $("#core-cards")).forEach(c => c.classList.toggle("sel", c === card));
+    const core = coreObj(_curCore);
+    const first = core && core.models[0] ? core.models[0].label : "";
+    populateModels(_curCore, first);
+    await applyModel(_curCore, first);
   });
-  function backendMsg(text, level) {
-    let el = $("#backend-msg");
-    if (!text) { if (el) el.hidden = true; return; }
-    if (!el) { el = document.createElement("div"); el.id = "backend-msg"; el.style.marginTop = "10px"; $("#backend-cards").after(el); }
-    el.hidden = false;
+  // 換模型 → 套用
+  $("#model-select").addEventListener("change", async e => {
+    updateArch();
+    await applyModel(_curCore, e.target.value);
+  });
+  let _modelLoading = false;       // 模型「就地下載並載入」進行中（進度導到模型頁）
+  async function applyModel(core, model) {
+    try {
+      const res = await API.setModel(core, model);
+      if (res && res.message) modelMsg(res.message, res.restartRequired ? "warn" : "info");
+      else modelMsg("", null);
+      updateLoadBtn(res);
+    } catch (err) { modelMsg("套用失敗：" + (err.message || err), "warn"); }
+  }
+  // 依 setModel 結果 + 目前載入狀態，決定「下載並載入」按鈕的文字/可用性
+  async function updateLoadBtn(res) {
+    const btn = $("#btn-model-load"); if (!btn) return;
+    let st = {};
+    try { st = await API.getStatus(); } catch (e) {}
+    btn.classList.remove("btn-ghost");
+    if (_modelLoading || st.loading) {
+      btn.disabled = true; btn.textContent = T("model.loading", "下載／載入中…"); return;
+    }
+    if (st.modelReady && !(res && res.restartRequired)) {
+      // 已就緒且未要求重啟 → 引導前往轉錄
+      btn.disabled = false; btn.textContent = T("model.goto", "前往語音轉文字"); btn.dataset.act = "goto"; return;
+    }
+    if (res && res.restartRequired) {
+      // 已載入其他核心、切換需重啟 → 按鈕反白（不可就地載入）
+      btn.disabled = true; btn.textContent = T("model.needRestart", "切換核心需重新啟動"); btn.dataset.act = ""; return;
+    }
+    // 尚未載入 → 可就地下載並載入
+    btn.disabled = false; btn.textContent = T("model.load", "下載並載入模型"); btn.dataset.act = "load";
+  }
+  $("#btn-model-load") && $("#btn-model-load").addEventListener("click", async () => {
+    const btn = $("#btn-model-load");
+    if (btn.dataset.act === "goto") { switchView("file"); return; }
+    _modelLoading = true; btn.disabled = true; btn.textContent = "下載／載入中…";
+    $("#model-progress").hidden = false;
+    setModelProg(0, "準備載入…");
+    modelMsg("正在下載並載入模型，請稍候——可留在本頁觀看進度。", "info");
+    try { await API.startLoad(); }
+    catch (err) { _modelLoading = false; modelMsg("載入失敗：" + (err.message || err), "warn"); updateLoadBtn(); }
+  });
+  function setModelProg(pct, status) {
+    $("#model-prog-bar").style.width = pct + "%";
+    $("#model-prog-pct").textContent = Math.round(pct) + "%";
+    if (status != null) $("#model-prog-status").textContent = status;
+  }
+  function modelMsg(text, level) {
+    const el = $("#model-msg");
+    if (!text) { el.hidden = true; el.innerHTML = ""; return; }
+    el.hidden = false; el.style.marginTop = "10px";
     el.className = "banner " + (level === "warn" ? "banner-warn" : "banner-info");
     el.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg><div>${escapeHtml(text)}</div>`;
   }
   const ICON_CPU = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg>`;
   const ICON_GPU = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 18v2M18 18v2"/></svg>`;
+
+  // ── 辨識語言下拉（依已載入引擎；OpenVINO 用 processor 清單）────────
+  async function loadLanguages() {
+    try {
+      const { languages } = await API.getLanguages();
+      // 音檔頁與錄製頁各有自己的語言下拉，皆依目前引擎填同一份清單。
+      ["#sel-lang", "#rec-lang"].forEach(id => {
+        const sel = $(id); if (!sel) return;
+        const cur = sel.value;
+        sel.innerHTML = "";
+        languages.forEach(l => {
+          const o = document.createElement("option");
+          o.value = l.value; o.textContent = l.value ? l.label : "語言 自動";
+          sel.appendChild(o);
+        });
+        if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+      });
+    } catch (e) {}
+  }
 
   // ════════════════════════════════════════════════════════
   // 端點
@@ -438,7 +690,49 @@
     $("#ep-url").dataset.full = e.url;
     $("#ep-key").textContent = "••••••••••••";
     $("#ep-key").dataset.full = e.key;
+    applyEpQr(e);
+    renderTunnel();
   }
+  // 上傳網頁 QR（區網）：服務啟動且有網址才顯示
+  function applyEpQr(e) {
+    const qr = $("#ep-qr"), src = e.running ? API.qrSrc(e.url) : "";
+    if (src) { qr.src = src; qr.hidden = false; } else { qr.hidden = true; }
+    $("#ep-qr-hint").textContent = e.running ? "同網段裝置可掃此 QR 直接開啟上傳頁" : "（服務未啟動）";
+  }
+
+  // ── 對外臨時網址（Cloudflare）─────────────────────────────
+  async function renderTunnel() { applyTunnelState(await API.getTunnel()); }
+  function applyTunnelState(t) {
+    $("#sw-tunnel").checked = !!t.running;
+    const ready = !!(t.running && t.url);
+    const st = $("#cf-state");
+    st.className = "chip " + (ready ? "chip-ok" : (t.running ? "chip-accent" : "chip-muted"));
+    st.innerHTML = `<span style="font-size:9px">●</span> ${ready ? "對外中" : (t.running ? "建立中…" : "未啟用")}`;
+    $("#cf-body").hidden = !t.running;
+    if (t.url) {
+      $("#cf-url").textContent = maskKeyInUrl(t.url); $("#cf-url").dataset.full = t.url;
+      const src = API.qrSrc(t.url), qr = $("#cf-qr");
+      if (src) { qr.src = src; qr.hidden = false; } else qr.hidden = true;
+    } else {
+      $("#cf-url").textContent = "（建立中…）"; $("#cf-url").dataset.full = "";
+      $("#cf-qr").hidden = true;
+    }
+    const cs = $("#cf-status");
+    cs.className = "cf-status" + (t.error ? " err" : (t.status === "ready" ? " ok" : ""));
+    cs.textContent = t.error ? t.status
+      : (t.status === "ready" ? "✅ 已建立對外網址（含金鑰，等同密碼）— 用完請關閉" : (t.status || ""));
+  }
+  $("#sw-tunnel").addEventListener("change", async e => {
+    const on = e.target.checked;
+    if (on && !$("#sw-endpoint").checked) {        // 通道須先有端點服務
+      e.target.checked = false;
+      const cs = $("#cf-status"); cs.className = "cf-status err"; cs.textContent = "請先啟動端點服務";
+      return;
+    }
+    applyTunnelState(await API.toggleTunnel(on));
+  });
+  // 後端建立通道為非同步：狀態/網址就緒時由 SSE "tunnel" 事件推回
+  API.on("tunnel", t => applyTunnelState(t));
   function setEpState(on) {
     const c = $("#ep-state");
     c.className = "chip " + (on ? "chip-ok" : "chip-muted");
@@ -446,8 +740,14 @@
   }
   function maskKeyInUrl(url) { return url.replace(/k=[^&]+/, "k=•••••"); }
   $("#sw-endpoint").addEventListener("change", async e => {
-    const r = await API.toggleEndpoint(e.target.checked); setEpState(r.running);
-    $("#ep-url").textContent = r.running ? maskKeyInUrl(r.url) : "（服務未啟動）";
+    await API.toggleEndpoint(e.target.checked, $("#ep-port").value.trim());
+    renderEndpoint();                       // 重新同步埠/網址/金鑰（換埠會重建服務）
+  });
+  // 監聽埠變更：服務執行中 → 以新埠重建並刷新；未啟動 → 保留輸入值，啟動時才採用
+  $("#ep-port").addEventListener("change", async () => {
+    if (!$("#sw-endpoint").checked) return;
+    await API.toggleEndpoint(true, $("#ep-port").value.trim());
+    renderEndpoint();
   });
   $("#btn-reveal-key").addEventListener("click", () => {
     const k = $("#ep-key"); const showing = k.dataset.shown === "1";
@@ -476,13 +776,19 @@
     const s = await API.getSettings();
     $("#set-scale").value = s.scale; $("#set-scale-val").textContent = s.scale + "%";
     applyScale(s.scale);
-    segSet("#set-format", s.format); segSet("#set-vocab", s.vocab); segSet("#set-theme", s.theme);
+    segSet("#set-format", s.format); segSet("#set-vocab", s.vocab); segSet("#set-theme", s.theme || "light");
+    applyTheme(s.theme || "light");                 // 啟動即套用深/淺色
     $("#set-mirror").value = s.mirror || "";
-    if (s.ffmpeg) $("#set-ffmpeg").value = s.ffmpeg;
+    $("#set-ffmpeg").value = s.ffmpeg || "";
     if (s.vad != null) { $("#set-vad").value = s.vad; $("#set-vad-val").textContent = (+s.vad).toFixed(2); }
+    // 介面語言：選單回填 + 套用 i18n（含目前視圖標題）
+    const uiLang = s.uiLang || "繁體中文";
+    if ([...$("#set-lang").options].some(o => o.value === uiLang)) $("#set-lang").value = uiLang;
+    if (window.I18N) { I18N.setLang(uiLang); refreshViewTitle(); }
   }
   function segSet(sel, v) { $$(sel + " button").forEach(b => b.classList.toggle("on", b.dataset.v === v)); }
-  function applyScale(pct) { document.documentElement.style.fontSize = (14 * pct / 100).toFixed(1) + "px"; }
+  // 介面縮放：用 CSS zoom（Chromium/WebView2 支援）整體縮放，px 版面也能等比生效。
+  function applyScale(pct) { document.body.style.zoom = (Math.max(50, Math.min(200, +pct || 100)) / 100); }
 
   $("#set-scale").addEventListener("input", e => {
     const v = +e.target.value; $("#set-scale-val").textContent = v + "%"; applyScale(v); API.setSettings({ scale: v });
@@ -500,7 +806,40 @@
     });
   });
   $("#set-mirror").addEventListener("change", e => API.setSettings({ mirror: e.target.value.trim() }));
-  function applyTheme(t) { /* 深色主題後續以 data-theme 切 token；此處先記錄 */ document.documentElement.dataset.theme = t; }
+  // 外觀主題：淺/深/跟隨系統。system 解析成實際 light/dark 掛到 <html>，並監聽 OS 變化。
+  // 視窗標題列深淺由後端（app_webview）依同一設定同步，故只需把偏好寫回 setSettings。
+  let _mqHandler = null;
+  function resolveTheme(t) {
+    if (t === "dark" || t === "light") return t;
+    return (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light";
+  }
+  function applyTheme(t) {
+    document.documentElement.dataset.theme = resolveTheme(t);   // 實際 light/dark
+    document.documentElement.dataset.themePref = t;             // 原始偏好
+    if (window.matchMedia) {
+      const mq = window.matchMedia("(prefers-color-scheme: dark)");
+      if (_mqHandler) { try { mq.removeEventListener("change", _mqHandler); } catch (e) {} _mqHandler = null; }
+      if (t === "system") {
+        _mqHandler = () => { document.documentElement.dataset.theme = resolveTheme("system"); };
+        try { mq.addEventListener("change", _mqHandler); } catch (e) {}
+      }
+    }
+  }
+  $("#set-ffmpeg").addEventListener("change", e => API.setSettings({ ffmpeg: e.target.value.trim() }));
+  // 介面語言切換：寫回設定 + 即時套用 i18n（含目前視圖標題、模型頁動態文字）
+  $("#set-lang").addEventListener("change", e => {
+    const v = e.target.value;
+    API.setSettings({ uiLang: v });
+    if (window.I18N) { I18N.setLang(v); refreshViewTitle(); }
+    if (_curView === "model") renderModel();   // 重繪動態文字（核心卡描述等）
+  });
+  // 檢查更新：開啟 GitHub Releases 頁（系統瀏覽器）
+  $("#btn-check-update") && $("#btn-check-update").addEventListener("click", async () => {
+    const btn = $("#btn-check-update"); const o = btn.textContent;
+    btn.disabled = true; btn.textContent = "開啟中…";
+    try { await API.checkUpdate(); } catch (e) {}
+    setTimeout(() => { btn.disabled = false; btn.textContent = o; }, 1500);
+  });
 
   // ── 共用工具 ────────────────────────────────────────────
   function fmtClock(sec) {
@@ -518,20 +857,95 @@
     on: false, sec: 0, timer: null, raf: 0, firstResult: true,
     stream: null, ctx: null, analyser: null, recorder: null, chunks: [],
     speech: false, silentSince: 0, segStart: 0,
+    segs: [],            // 累積辨識結果（含合成時間軸），供清除／存檔／即時存檔
+    fileHandle: null,    // 即時存檔的 File System Access 檔案 handle（若支援）
   };
   const SILENCE_MS = 2200, MIN_SEG_MS = 500, MAX_SEG_MS = 20000, VAD_THRESH = 0.014;
+  const REC_LINE_SECS = 5;     // 錄製無精確時間戳 → 每段合成固定 5s（比照 app.py）
 
   $("#rec-btn").addEventListener("click", () => REC.on ? stopRec() : startRec());
 
   function recSupported() {
     return navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder;
   }
+
+  // ── 麥克風權限狀態（整合進頁面，而非僅依賴瀏覽器彈窗）──────────────
+  //   瀏覽器原生「允許麥克風」提示由 WebView2/Edge 控制、無法被頁面取代；
+  //   但我們用 Permissions API 把「已授權／將詢問／被拒」狀態與指引顯示在頁內，
+  //   被拒時給明確的頁內排除說明，不再只是一行錯誤。
+  async function refreshMicPerm() {
+    const chip = $("#rec-perm"), help = $("#rec-perm-help");
+    if (!chip) return;
+    if (!recSupported()) {
+      chip.hidden = false; chip.className = "chip chip-muted"; chip.textContent = "不支援錄音";
+      return;
+    }
+    let state = "prompt";
+    try {
+      if (navigator.permissions && navigator.permissions.query) {
+        const st = await navigator.permissions.query({ name: "microphone" });
+        state = st.state;                       // granted / denied / prompt
+        st.onchange = () => refreshMicPerm();    // 狀態變更即時更新
+      }
+    } catch (e) { state = "prompt"; }
+    chip.hidden = false;
+    if (state === "granted") {
+      chip.className = "chip chip-ok"; chip.textContent = T("record.permGranted", "麥克風已授權");
+      if (help) help.hidden = true;
+    } else if (state === "denied") {
+      chip.className = "chip chip-live"; chip.textContent = T("record.permDeniedShort", "麥克風被拒");
+      if (help) help.hidden = false;
+    } else {
+      chip.className = "chip chip-muted"; chip.textContent = T("record.permPrompt", "按麥克風時將請求授權");
+      if (help) help.hidden = true;
+    }
+  }
+
+  // ── 麥克風裝置列舉（瀏覽器原生；對應 app.py 的 sounddevice 裝置選擇）──────
+  //   裝置標籤在未授權前為空字串 → 首次 getUserMedia 後再列舉一次才有名稱。
+  async function enumerateMics() {
+    const sel = $("#rec-mic");
+    if (!sel || !navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+    try {
+      const cur = sel.value;
+      const devs = await navigator.mediaDevices.enumerateDevices();
+      const mics = devs.filter(d => d.kind === "audioinput");
+      sel.innerHTML = "";
+      const def = document.createElement("option");
+      def.value = ""; def.textContent = "預設麥克風";
+      sel.appendChild(def);
+      mics.forEach((d, i) => {
+        const o = document.createElement("option");
+        o.value = d.deviceId;
+        o.textContent = d.label || `麥克風 ${i + 1}`;
+        sel.appendChild(o);
+      });
+      if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+    } catch (e) { /* 列舉失敗 → 保留預設選項 */ }
+  }
+  $("#rec-mic-refresh") && $("#rec-mic-refresh").addEventListener("click", enumerateMics);
+  if (navigator.mediaDevices) {
+    try { navigator.mediaDevices.addEventListener("devicechange", enumerateMics); } catch (e) {}
+  }
+
   async function startRec() {
     if (!recSupported()) { recNote("此環境不支援錄音 API。", true); return; }
+    // 依選定的麥克風建立音訊約束（空值 → 系統預設裝置）。
+    const micId = $("#rec-mic") ? $("#rec-mic").value : "";
+    const audioConstraint = { echoCancellation: true, noiseSuppression: true };
+    if (micId) audioConstraint.deviceId = { exact: micId };
     try {
-      REC.stream = await navigator.mediaDevices.getUserMedia(
-        { audio: { echoCancellation: true, noiseSuppression: true } });
-    } catch (err) { recNote("無法取得麥克風：" + (err.message || err), true); return; }
+      REC.stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraint });
+    } catch (err) {
+      // 被拒 / 無裝置 → 頁內顯示權限指引，不只丟一行錯誤
+      const denied = err && (err.name === "NotAllowedError" || err.name === "SecurityError");
+      recNote((denied ? "麥克風權限被拒。" : "無法取得麥克風：") + (err.message || err), true);
+      refreshMicPerm();
+      if (denied && $("#rec-perm-help")) $("#rec-perm-help").hidden = false;
+      return;
+    }
+    enumerateMics();    // 授權後重新列舉 → 取得真實裝置名稱
+    refreshMicPerm();
     REC.ctx = new (window.AudioContext || window.webkitAudioContext)();
     const src = REC.ctx.createMediaStreamSource(REC.stream);
     REC.analyser = REC.ctx.createAnalyser(); REC.analyser.fftSize = 1024;
@@ -564,7 +978,8 @@
     if (ok) {
       try {
         const file = new File([blob], "recording.webm", { type: blob.type });
-        const res = await API.transcribe({ file, diarize: false, align: false });
+        const recLang = $("#rec-lang") ? $("#rec-lang").value : "";
+        const res = await API.transcribe({ file, language: recLang || null, diarize: false, align: false });
         (res.segments || []).forEach(s => { if (s.text && s.text.trim()) appendRecLine(s.text.trim()); });
       } catch (err) { recNote("辨識失敗：" + (err.message || err), true); }
     }
@@ -610,22 +1025,106 @@
   function appendRecLine(text) {
     const host = $("#rec-subs");
     if (REC.firstResult) { host.innerHTML = ""; REC.firstResult = false; }
+    // 合成時間軸：錄製無精確時間戳，每段固定 5s、段間 0.1s（比照 app.py _on_rt_save）。
+    const start = REC.segs.length ? REC.segs[REC.segs.length - 1].end + 0.1 : 0;
+    const seg = { start, end: start + REC_LINE_SECS, speaker: null, text };
+    REC.segs.push(seg);
     const el = document.createElement("div");
     el.className = "sub-card";
     el.innerHTML = `<span class="tc">${fmtClock(REC.sec)}</span>
       <div class="body"><div class="txt">${escapeHtml(text)}</div></div>`;
     host.appendChild(el);
     host.scrollTop = host.scrollHeight;
+    $("#rec-save").disabled = false;
+    if (REC.fileHandle) recAutosaveWrite();    // 即時存檔：每段附加後即落盤
+  }
+
+  // ── 清除／儲存／即時存檔（對應 app.py 錄製頁的清除、儲存 SRT、即時追加保存）──
+  function recClear() {
+    REC.segs = []; REC.firstResult = true;
+    $("#rec-subs").innerHTML = `<div class="sub-card"><span class="tc">— · —</span>`
+      + `<div class="body"><div class="txt" style="color:var(--muted)">開始錄音後，辨識結果會逐段出現在這裡。</div></div></div>`;
+    $("#rec-save").disabled = true;
+  }
+  async function recSave() {
+    if (!REC.segs.length) return;
+    let fmt = "srt";
+    try { fmt = (await API.getSettings()).format || "srt"; } catch (e) {}
+    const text = fmt === "txt" ? buildTxt(REC.segs) : buildSrt(REC.segs);
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "").slice(0, 14);
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `realtime_${stamp}` + (fmt === "txt" ? ".txt" : ".srt");
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+  $("#rec-clear") && $("#rec-clear").addEventListener("click", recClear);
+  $("#rec-save") && $("#rec-save").addEventListener("click", recSave);
+
+  // 即時存檔：用 File System Access API（WebView2/Edge 支援）持續把目前累積的
+  // 字幕寫入使用者選定的檔案 —— 重現 app.py「即時追加保存，可隨時中斷不遺失」。
+  // 不支援的環境隱藏此開關（仍可用「儲存字幕」一次性匯出）。
+  const FS_SAVE_OK = typeof window.showSaveFilePicker === "function";
+  if (FS_SAVE_OK) $("#rec-autosave-wrap").hidden = false;
+  $("#rec-autosave") && $("#rec-autosave").addEventListener("change", async e => {
+    if (!e.target.checked) { REC.fileHandle = null; return; }
+    try {
+      let fmt = "srt";
+      try { fmt = (await API.getSettings()).format || "srt"; } catch (err) {}
+      const ext = fmt === "txt" ? "txt" : "srt";
+      REC.fileHandle = await window.showSaveFilePicker({
+        suggestedName: `realtime.${ext}`,
+        types: [{ description: "字幕檔", accept: { "text/plain": ["." + ext] } }],
+      });
+      await recAutosaveWrite();           // 立即寫一次（含既有片段）
+      recNote("即時存檔已啟用：每段辨識完成後會自動寫入所選檔案。");
+    } catch (err) {                         // 使用者取消選檔 → 還原開關
+      REC.fileHandle = null; e.target.checked = false;
+    }
+  });
+  async function recAutosaveWrite() {
+    if (!REC.fileHandle) return;
+    try {
+      let fmt = "srt";
+      try { fmt = (await API.getSettings()).format || "srt"; } catch (e) {}
+      const text = fmt === "txt" ? buildTxt(REC.segs) : buildSrt(REC.segs);
+      const w = await REC.fileHandle.createWritable();   // 截斷重寫（內容小，安全可靠）
+      await w.write(text); await w.close();
+    } catch (e) { recNote("即時存檔寫入失敗：" + (e.message || e), true); REC.fileHandle = null; }
   }
 
   // ── 啟動 ────────────────────────────────────────────────
-  API.on("status", refreshStatus);          // 桌面背景載入完成 → 更新就緒燈
+  // 載入完成 → 更新就緒燈 + 語言清單（依引擎）；若為「就地下載並載入」流程 → 收尾
+  API.on("status", async (s) => {
+    refreshStatus(); loadLanguages();
+    let ready = s && s.modelReady;
+    if (ready == null) { try { ready = (await API.getStatus()).modelReady; } catch (e) {} }
+    if (_modelLoading && ready) {
+      _modelLoading = false;
+      setModelProg(100, "完成");
+      setTimeout(() => { $("#model-progress").hidden = true; }, 800);
+      modelMsg("模型已就緒。已為你切換到「語音轉文字」。", "info");
+      renderHealth();                 // 自檢色點刷新
+      switchView("file");             // 完成 → 進入轉錄頁
+    } else if (s && s.error && _modelLoading) {
+      _modelLoading = false;
+      $("#model-progress").hidden = true;
+      modelMsg("載入失敗：" + s.error, "warn");
+      updateLoadBtn();
+    }
+  });
   (async function init() {
     await API.ready;
     await refreshStatus();
+    await loadLanguages();
     await loadSettings();
     await renderEndpoint();
-    // 預設視圖已是「音檔」；其餘視圖切換時才渲染
-    console.info("[app] ready, mode =", API.mode);
+    // 開始頁決策：目前選擇的模型已就緒 → 直接進「語音轉文字」；否則停在「模型」頁，
+    // 讓使用者先確認硬體＋選擇模型（可改 Whisper 等），按「下載並載入」才下載。
+    let ready = false;
+    try { ready = !!(await API.getStatus()).selectedReady; } catch (e) {}
+    switchView(ready ? "file" : "model");
+    console.info("[app] ready, mode =", API.mode, "selectedReady =", ready);
   })();
 })();

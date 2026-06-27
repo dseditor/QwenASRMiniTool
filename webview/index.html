@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>聲音辨識</title>
+<title>聲音辨識小工具</title>
+<link rel="icon" type="image/png" href="favicon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Noto+Sans+TC:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -15,40 +16,40 @@
   <!-- ════════════ 側欄 ════════════ -->
   <aside class="sidebar">
     <div class="brand">
-      <div class="logo" title="聲音辨識">
+      <div class="logo" title="聲音辨識小工具">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <rect x="9" y="2" width="6" height="12" rx="3"></rect>
           <path d="M5 10a7 7 0 0 0 14 0"></path>
           <line x1="12" y1="19" x2="12" y2="22"></line>
         </svg>
       </div>
-      <div class="name">聲音辨識</div>
+      <div class="name">聲音辨識小工具</div>
     </div>
 
     <nav class="nav" id="nav">
       <button class="nav-item active" data-view="file">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 14h6M9 18h4"/></svg>
-        <span class="lbl">音檔</span>
+        <span class="lbl" data-i18n="nav.file">音檔</span>
       </button>
       <button class="nav-item" data-view="batch">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="4" rx="1"/><rect x="3" y="10" width="18" height="4" rx="1"/><rect x="3" y="16" width="18" height="4" rx="1"/></svg>
-        <span class="lbl">批次</span>
+        <span class="lbl" data-i18n="nav.batch">批次</span>
       </button>
       <button class="nav-item" data-view="record">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
-        <span class="lbl">錄製</span>
+        <span class="lbl" data-i18n="nav.record">錄製</span>
       </button>
       <button class="nav-item" data-view="endpoint">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6"/><path d="M7 8h10v3a5 5 0 0 1-10 0z"/><path d="M12 16v6"/></svg>
-        <span class="lbl">端點</span>
+        <span class="lbl" data-i18n="nav.endpoint">端點</span>
       </button>
       <button class="nav-item" data-view="model">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg>
-        <span class="lbl">模型</span>
+        <span class="lbl" data-i18n="nav.model">模型</span>
       </button>
       <button class="nav-item" data-view="settings">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-        <span class="lbl">設定</span>
+        <span class="lbl" data-i18n="nav.settings">設定</span>
       </button>
     </nav>
 
@@ -72,35 +73,39 @@
       <section class="view active" data-view="file">
         <div class="drop" id="drop">
           <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg></div>
-          <div class="big">拖曳音訊到此，或<b>點擊選擇檔案</b></div>
-          <div class="sub">支援 mp3 / wav / m4a / 影片音軌</div>
+          <div class="big" data-i18n-html="file.dropBig">拖曳音訊到此，或<b>點擊選擇檔案</b></div>
+          <div class="sub" data-i18n="file.dropSub">支援 mp3 / wav / m4a / 影片音軌</div>
         </div>
 
         <div class="controls">
           <button class="btn btn-primary" id="btn-run" disabled>
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>開始轉換
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg><span data-i18n="file.run">開始轉換</span>
           </button>
           <button class="btn btn-ghost" id="btn-open-dir" disabled>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>開啟輸出資料夾
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span data-i18n="file.openDir">開啟輸出資料夾</span>
+          </button>
+          <button class="btn btn-ghost" id="btn-save-sub" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg><span data-i18n="file.saveSub">字幕存檔</span>
           </button>
           <!-- 字幕驗證：對應模組於 WebView 上尚未重新規劃，暫時隱藏 -->
           <button class="btn btn-ghost" id="btn-verify" hidden disabled>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>字幕驗證
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg><span data-i18n="file.verify">字幕驗證</span>
           </button>
           <div class="sp"></div>
-          <label class="switch"><input type="checkbox" id="sw-diar" checked><span class="track"></span>說話者分離</label>
+          <select class="select" id="sel-lang" data-i18n-title="file.diar"><option value="" data-i18n="common.langAuto">語言 自動</option></select>
+          <label class="switch"><input type="checkbox" id="sw-diar" checked><span class="track"></span><span data-i18n="file.diar">說話者分離</span></label>
           <select class="select" id="sel-spk" title="人數">
-            <option value="auto">人數 自動</option>
+            <option value="auto" data-i18n="common.spkAuto">人數 自動</option>
             <option>2</option><option>3</option><option>4</option><option>5</option><option>6</option>
           </select>
-          <label class="switch"><input type="checkbox" id="sw-align" checked><span class="track"></span>時間軸對齊</label>
+          <label class="switch"><input type="checkbox" id="sw-align" checked><span class="track"></span><span data-i18n="file.align">時間軸對齊</span></label>
         </div>
 
         <div class="hint-head">
-          <div class="l"><span class="t">辨識提示（可選）</span><span class="d">貼入歌詞、關鍵字或背景說明，可提升辨識準確度</span></div>
-          <button class="btn btn-ghost btn-sm" id="btn-load-txt">讀入 TXT…</button>
+          <div class="l"><span class="t" data-i18n="file.hintTitle">辨識提示（可選）</span><span class="d" data-i18n="file.hintDesc">貼入歌詞、關鍵字或背景說明，可提升辨識準確度</span></div>
+          <button class="btn btn-ghost btn-sm" id="btn-load-txt" data-i18n="file.loadTxt">讀入 TXT…</button>
         </div>
-        <textarea class="input" id="hint-box" placeholder="例如：本段為產品行銷 Podcast，會出現「轉換率」「漏斗」等行銷術語…"></textarea>
+        <textarea class="input" id="hint-box" data-i18n-ph="file.hintPh" placeholder="例如：本段為產品行銷 Podcast，會出現「轉換率」「漏斗」等行銷術語…"></textarea>
 
         <div class="progress" id="progress" hidden>
           <div class="meta"><span class="s" id="prog-status">辨識中 · 第 5/8 段</span><span class="p" id="prog-pct">68%</span></div>
@@ -109,7 +114,7 @@
 
         <!-- Signature：波形 + 字幕卡 -->
         <div class="result" id="result" hidden>
-          <div class="sec-title">辨識結果</div>
+          <div class="sec-title" data-i18n="file.resultTitle">辨識結果</div>
           <div class="wave-panel">
             <div class="wave" id="wave"></div>
             <div class="wave-time"><span>00:00</span><span id="wave-dur">00:00</span></div>
@@ -117,6 +122,9 @@
             <div class="wave-ctrls">
               <button class="play-btn" id="wave-play" aria-label="播放／暫停">
                 <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+              </button>
+              <button class="play-btn play-btn-ghost" id="wave-stop" aria-label="停止">
+                <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
               </button>
               <span class="play-time"><span id="wave-cur">00:00</span> · 點波形、字幕或下方區塊可跳播</span>
             </div>
@@ -130,8 +138,13 @@
       <!-- ───── 批次辨識 ───── -->
       <section class="view" data-view="batch">
         <div class="batch-head">
-          <button class="btn btn-ghost" id="btn-batch-add"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>加入檔案</button>
-          <button class="btn btn-primary" id="btn-batch-run"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>全部開始</button>
+          <button class="btn btn-ghost" id="btn-batch-add"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg><span data-i18n="batch.add">加入檔案</span></button>
+          <button class="btn btn-primary" id="btn-batch-run"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg><span data-i18n="batch.run">全部開始</span></button>
+          <label class="switch"><input type="checkbox" id="sw-batch-diar"><span class="track"></span><span data-i18n="file.diar">說話者分離</span></label>
+          <select class="select" id="sel-batch-spk" title="人數">
+            <option value="auto" data-i18n="common.spkAuto">人數 自動</option>
+            <option>2</option><option>3</option><option>4</option><option>5</option><option>6</option>
+          </select>
           <div class="sp"></div>
           <div class="summary" id="batch-summary">3 / 7 完成</div>
         </div>
@@ -140,6 +153,18 @@
 
       <!-- ───── 錄製轉換 ───── -->
       <section class="view" data-view="record">
+        <div class="controls">
+          <span style="font-size:13px;color:var(--ink-2);min-width:48px" data-i18n="record.mic">麥克風</span>
+          <select class="select" id="rec-mic" style="min-width:240px" title="錄音輸入裝置"><option value="">預設麥克風</option></select>
+          <button class="btn btn-ghost btn-sm" id="rec-mic-refresh" data-i18n="record.refresh">重新整理</button>
+          <span class="chip chip-muted" id="rec-perm" hidden></span>
+          <div class="sp"></div>
+          <select class="select" id="rec-lang" title="辨識語言"><option value="" data-i18n="common.langAuto">語言 自動</option></select>
+        </div>
+        <div class="banner banner-warn" id="rec-perm-help" hidden style="margin-bottom:10px">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          <div data-i18n="record.permDenied">麥克風權限被拒。請在視窗右上角網址列的權限圖示中允許麥克風，或於系統設定開放本程式的麥克風存取後再試。</div>
+        </div>
         <div class="card">
           <div class="rec-stage">
             <button class="rec-btn" id="rec-btn" aria-label="開始錄音">
@@ -147,11 +172,16 @@
             </button>
             <div class="rec-timer" id="rec-timer">00:00</div>
             <div class="rec-live-wave" id="rec-live-wave" hidden></div>
-            <div class="rec-note">錄製轉換：偵測到說話停頓時才辨識，句中短暫停頓不會中斷。按麥克風開始，再按一次結束並完成最後一段。</div>
+            <div class="rec-note" data-i18n="record.note">錄製轉換：偵測到說話停頓時才辨識，句中短暫停頓不會中斷。按麥克風開始，再按一次結束並完成最後一段。</div>
           </div>
         </div>
-        <div class="hint-head"><div class="l"><span class="t">即時字幕</span></div></div>
-        <div class="subs" id="rec-subs"><div class="sub-card"><span class="tc">— · —</span><div class="body"><div class="txt" style="color:var(--muted)">開始錄音後，辨識結果會逐段出現在這裡。</div></div></div></div>
+        <div class="hint-head">
+          <div class="l"><span class="t" data-i18n="record.liveTitle">即時字幕</span><span class="d" data-i18n="record.liveDesc">說完停頓自動辨識；可清除或依輸出格式存檔</span></div>
+          <label class="switch" id="rec-autosave-wrap" hidden style="margin-right:6px"><input type="checkbox" id="rec-autosave"><span class="track"></span><span data-i18n="record.autosave">即時存檔</span></label>
+          <button class="btn btn-ghost btn-sm" id="rec-clear" data-i18n="record.clear">清除</button>
+          <button class="btn btn-ghost btn-sm" id="rec-save" disabled data-i18n="record.save">儲存字幕</button>
+        </div>
+        <div class="subs" id="rec-subs"><div class="sub-card"><span class="tc">— · —</span><div class="body"><div class="txt" style="color:var(--muted)" data-i18n="record.placeholder">開始錄音後，辨識結果會逐段出現在這裡。</div></div></div></div>
       </section>
 
       <!-- ───── 端點 ───── -->
@@ -168,12 +198,36 @@
         <div class="ep-grid">
           <div class="card">
             <div class="d" style="font-size:12px;color:var(--muted);margin-bottom:7px">上傳網頁（手機掃 QR 或開啟）</div>
-            <div class="copy-field"><code id="ep-url">http://192.168.1.20:11435/?k=•••••</code><button class="btn btn-ghost btn-sm" data-copy="#ep-url">複製</button></div>
+            <div class="qr-row">
+              <img id="ep-qr" class="qr" alt="上傳網頁 QR" hidden>
+              <div class="qr-side">
+                <div class="copy-field"><code id="ep-url">http://192.168.1.20:11435/?k=•••••</code><button class="btn btn-ghost btn-sm" data-copy="#ep-url">複製</button></div>
+                <div class="qr-hint" id="ep-qr-hint">同網段裝置可掃此 QR 直接開啟上傳頁</div>
+              </div>
+            </div>
           </div>
           <div class="card">
             <div class="d" style="font-size:12px;color:var(--muted);margin-bottom:7px">存取金鑰（等同密碼）</div>
             <div class="copy-field"><code id="ep-key">••••••••••••</code><button class="btn btn-ghost btn-sm" id="btn-reveal-key">顯示</button><button class="btn btn-ghost btn-sm" id="btn-newkey">重設</button></div>
           </div>
+        </div>
+
+        <div class="sec-title">對外臨時網址（Cloudflare）</div>
+        <div class="card">
+          <div class="row">
+            <div class="label"><div class="t">建立對外網址</div><div class="d">透過 Cloudflare 臨時通道讓外網（非同網段）也能上傳；每次重啟網址會變，首次使用會下載 cloudflared（約 25MB）</div></div>
+            <span class="chip chip-muted" id="cf-state"><span style="font-size:9px">●</span> 未啟用</span>
+            <label class="switch"><input type="checkbox" id="sw-tunnel"><span class="track"></span>對外</label>
+          </div>
+          <div class="cf-warn">⚠️ 網址含金鑰（等同密碼），任何取得「完整網址」的人都能上傳、消耗你的 CPU/GPU。用完請立即關閉，勿外流網址／QR。</div>
+          <div class="cf-body qr-row" id="cf-body" hidden>
+            <img id="cf-qr" class="qr" alt="外網臨時網址 QR" hidden>
+            <div class="qr-side">
+              <div class="copy-field"><code id="cf-url">（建立中…）</code><button class="btn btn-ghost btn-sm" data-copy="#cf-url">複製</button></div>
+              <div class="qr-hint">外網臨時網址（含金鑰）— 掃描或複製給遠端裝置</div>
+            </div>
+          </div>
+          <div class="cf-status" id="cf-status"></div>
         </div>
 
         <div class="sec-title">設定</div>
@@ -186,50 +240,68 @@
 
       <!-- ───── 模型 ───── -->
       <section class="view" data-view="model">
-        <div class="sec-title">推理核心</div>
-        <div class="radio-cards" id="backend-cards">
-          <label class="radio-card sel"><span class="rd"></span><div class="info"><div class="t">CPU · OpenVINO INT8</div><div class="d">相容性最佳，任何電腦都能跑，不需顯卡</div></div></label>
-          <label class="radio-card"><span class="rd"></span><div class="info"><div class="t">GPU · chatllm Vulkan</div><div class="d">最快，需相容顯卡（部分 AMD 顯卡可能不穩）</div></div></label>
-          <label class="radio-card"><span class="rd"></span><div class="info"><div class="t">GPU · Whisper / Breeze-ASR</div><div class="d">繁體中文／台語特化，Vulkan 加速</div></div></label>
+        <div class="sec-title" style="display:flex;align-items:center;gap:10px">
+          <span data-i18n="model.health">系統自檢</span>
+          <span class="chip chip-muted" id="health-sum" style="font-weight:400">檢查中…</span>
+          <button class="btn btn-ghost btn-sm" id="btn-health-recheck" style="margin-left:auto" data-i18n="model.recheck">重新檢查</button>
+        </div>
+        <div id="health-panel" class="health-panel"></div>
+
+        <div class="sec-title" data-i18n="model.core">推理核心</div>
+        <div class="radio-cards" id="core-cards"></div>
+        <div class="model-pick" style="display:flex;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap">
+          <span style="font-size:13px;color:var(--ink-2);min-width:36px" data-i18n="model.model">模型</span>
+          <select class="select" id="model-select" style="min-width:250px"></select>
+          <span class="chip chip-muted" id="model-arch"></span>
+        </div>
+        <div id="model-note" class="banner banner-warn" hidden style="margin-top:10px"></div>
+        <div id="model-msg"></div>
+
+        <div class="model-load-row" style="display:flex;align-items:center;gap:12px;margin-top:12px">
+          <button class="btn btn-primary" id="btn-model-load">下載並載入模型</button>
+          <div class="progress" id="model-progress" hidden style="flex:1;margin:0">
+            <div class="meta"><span class="s" id="model-prog-status">準備中…</span><span class="p" id="model-prog-pct">0%</span></div>
+            <div class="bar"><i id="model-prog-bar" style="width:0%"></i></div>
+          </div>
         </div>
 
-        <div class="sec-title">偵測到的裝置</div>
+        <div class="sec-title" data-i18n="model.devices">偵測到的裝置</div>
         <div class="dev-list" id="dev-list">
           <div class="dev"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg></span><span class="nm">CPU · AMD Ryzen 5 9600X 6-Core</span><span class="vram">使用中</span></div>
           <div class="dev"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 18v2M18 18v2"/></svg></span><span class="nm">GPU · NVIDIA GeForce RTX 4070</span><span class="vram">8.0 GB 可用</span></div>
         </div>
 
-        <div class="sec-title">診斷</div>
+        <div class="sec-title" data-i18n="model.diag">診斷</div>
         <div class="banner banner-warn" id="gpu-diag">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-          <div>GPU 偵測未完成：<code style="font-family:var(--font-mono)">main.exe --show_devices</code> 逾時。已自動改用 CPU 推理；如需 GPU，請更新顯卡 / Vulkan 驅動後重試。</div>
+          <div>GPU 偵測由 <code style="font-family:var(--font-mono)">crispasr.exe --diagnostics</code> 進行；若未列出獨立顯示卡，請更新顯卡 / Vulkan 驅動後重試。</div>
         </div>
       </section>
 
       <!-- ───── 設定 ───── -->
       <section class="view settings" data-view="settings">
         <div class="card">
-          <div class="row"><div class="label"><div class="t">介面縮放</div><div class="d">調整文字與控制項大小</div></div>
+          <div class="row"><div class="label"><div class="t" data-i18n="set.scale">介面縮放</div><div class="d" data-i18n="set.scaleDesc">調整文字與控制項大小</div></div>
             <input type="range" class="slider" id="set-scale" min="80" max="150" step="5" value="100"><span class="slider-val" id="set-scale-val">100%</span></div>
-          <div class="row"><div class="label"><div class="t">輸出格式</div><div class="d">全域預設，影響單檔／批次／端點</div></div>
-            <div class="seg" id="set-format"><button class="on" data-v="srt">SRT 字幕</button><button data-v="txt">純文字</button></div></div>
-          <div class="row"><div class="label"><div class="t">語音偵測靈敏度（VAD）</div><div class="d">降低閾值可減少漏識（被當成空白的片段可能有聲音）；提高則減少假陽性。預設 0.50</div></div>
+          <div class="row"><div class="label"><div class="t" data-i18n="set.format">輸出格式</div><div class="d" data-i18n="set.formatDesc">全域預設，影響單檔／批次／端點</div></div>
+            <div class="seg" id="set-format"><button class="on" data-v="srt" data-i18n="set.fmtSrt">SRT 字幕</button><button data-v="txt" data-i18n="set.fmtTxt">純文字</button></div></div>
+          <div class="row"><div class="label"><div class="t" data-i18n="set.vad">語音偵測靈敏度（VAD）</div><div class="d" data-i18n="set.vadDesc">降低閾值可減少漏識（被當成空白的片段可能有聲音）；提高則減少假陽性。預設 0.50</div></div>
             <input type="range" class="slider" id="set-vad" min="0.30" max="0.80" step="0.01" value="0.50"><span class="slider-val" id="set-vad-val">0.50</span></div>
-          <div class="row"><div class="label"><div class="t">簡繁詞彙轉換</div><div class="d">把模型輸出轉成在地用語</div></div>
-            <div class="seg" id="set-vocab"><button data-v="off">關閉</button><button class="on" data-v="s2twp">台灣用語</button><button data-v="s2t">標準</button></div></div>
-          <div class="row"><div class="label"><div class="t">HuggingFace 鏡像站</div><div class="d">下載模型較慢時可改用鏡像</div></div>
+          <div class="row"><div class="label"><div class="t" data-i18n="set.vocab">簡繁詞彙轉換</div><div class="d" data-i18n="set.vocabDesc">把模型輸出轉成在地用語</div></div>
+            <div class="seg" id="set-vocab"><button data-v="off" data-i18n="set.vocabOff">關閉</button><button class="on" data-v="s2twp" data-i18n="set.vocabTW">台灣用語</button><button data-v="s2t" data-i18n="set.vocabStd">標準</button></div></div>
+          <div class="row"><div class="label"><div class="t" data-i18n="set.mirror">HuggingFace 鏡像站</div><div class="d" data-i18n="set.mirrorDesc">下載模型較慢時可改用鏡像</div></div>
             <input class="input mono" id="set-mirror" placeholder="hf-mirror.com" style="width:200px"></div>
-          <div class="row"><div class="label"><div class="t">FFmpeg 路徑</div><div class="d">處理影片音軌所需</div></div>
-            <div class="with-browse"><input class="input mono" id="set-ffmpeg" value="ffmpeg/ffmpeg.exe"><button class="btn btn-ghost btn-sm">瀏覽</button><span class="chip chip-ok">已偵測</span></div></div>
-          <div class="row"><div class="label"><div class="t">外觀主題</div></div>
-            <div class="seg" id="set-theme"><button class="on" data-v="light">淺色</button><button data-v="dark">深色</button><button data-v="system">跟隨系統</button></div></div>
-          <div class="row"><div class="label"><div class="t">介面語言</div></div>
-            <select class="select" id="set-lang"><option>繁體中文</option><option>English</option></select></div>
+          <div class="row"><div class="label"><div class="t" data-i18n="set.ffmpeg">FFmpeg 路徑</div><div class="d" data-i18n="set.ffmpegDesc">處理影片音軌所需（留空則需要時自動下載）</div></div>
+            <div class="with-browse"><input class="input mono" id="set-ffmpeg" placeholder="（留空＝自動偵測／需要時下載）" style="width:240px"><span class="chip chip-muted" id="ff-detected" hidden>已偵測</span></div></div>
+          <div class="row"><div class="label"><div class="t" data-i18n="set.theme">外觀主題</div></div>
+            <div class="seg" id="set-theme"><button class="on" data-v="light" data-i18n="set.themeLight">淺色</button><button data-v="dark" data-i18n="set.themeDark">深色</button><button data-v="system" data-i18n="set.themeSystem">跟隨系統</button></div></div>
+          <div class="row"><div class="label"><div class="t" data-i18n="set.lang">介面語言</div></div>
+            <select class="select" id="set-lang"><option>繁體中文</option><option>简体中文</option><option>English</option></select></div>
         </div>
         <div class="card" style="margin-top:14px;display:flex;align-items:center;gap:12px">
-          <div class="label"><div class="t" style="font-size:13px">聲音辨識 <span class="chip chip-muted" id="app-version">v—</span></div><div class="d">本地推理 · 資料不離開你的電腦</div></div>
+          <div class="label"><div class="t" style="font-size:13px">聲音辨識小工具 <span class="chip chip-muted" id="app-version">v—</span></div><div class="d" data-i18n="set.appDesc">本地推理 · 資料不離開你的電腦</div></div>
           <div class="sp" style="flex:1"></div>
-          <button class="btn btn-ghost btn-sm" id="btn-check-update">檢查更新</button>
+          <button class="btn btn-ghost btn-sm" id="btn-check-update" data-i18n="set.checkUpdate">檢查更新</button>
         </div>
       </section>
 
@@ -239,6 +311,7 @@
 
 <input id="hidden-file" type="file" accept="audio/*,video/*" style="display:none">
 <script src="js/bridge.js"></script>
+<script src="js/i18n.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

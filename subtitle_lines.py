@@ -18,6 +18,21 @@ _ZH_CLAUSE_END = frozenset('，。？！；：…—、·')
 _EN_SENT_END   = frozenset('.,!?;')
 
 
+def _strip_pua(s: str) -> str:
+    """濾除 Unicode 私用區字元（BMP U+E000–U+F8FF 與兩個補充平面）。
+
+    合法的中文／日文／英文字幕不會用到私用區；出現在這裡的一律是下游元件把
+    「無法映射的內部 ID」渲染成字元的產物，屬於亂碼。濾掉比留著好——留著會
+    一路污染 SRT、JSON 與外部 Agent。
+    """
+    if not s:
+        return s
+    return "".join(c for c in s
+                   if not (0xE000 <= ord(c) <= 0xF8FF
+                           or 0xF0000 <= ord(c) <= 0xFFFFD
+                           or 0x100000 <= ord(c) <= 0x10FFFD))
+
+
 def _srt_ts(s: float) -> str:
     ms = int(round(s * 1000))
     hh = ms // 3_600_000; ms %= 3_600_000
@@ -219,10 +234,16 @@ def _ts_chatllm_to_subtitle_lines(
     word_list = [w for (w, _s, _e) in ts_items]
     n = len(ts_items)
 
+    # 私用區（PUA）字元防線：這些不是任何模型的合法輸出，而是下游元件把「無法
+    # 映射的類別 ID」直接當成字元渲染的結果（實例：crispasr 的 qwen3 CTC 對齊器
+    # 遇到其類別表外的繁體字，會輸出 U+E000+class_id）。它們對使用者是亂碼，
+    # 也會污染下游（SRT／JSON／Agent）。在唯一的文字出口統一濾掉，任何引擎都受惠。
+
     # 繁化：text（整行）沿用既有「整行轉換」確保 SRT 輸出零變化；
     # words[].text 走「逐字轉換」（卡拉OK高亮單位）——兩者在極少數 s2twp
     # 詞組轉換情境可能有細微差異，但卡拉OK檢視只讀 words，不影響字幕卡/SRT。
     def _conv(s: str) -> str:
+        s = _strip_pua(s)
         return cc.convert(s) if (not simplified and cc is not None) else s
 
     seg_idx:   list[int] = []   # 當前行的 ts_items 索引

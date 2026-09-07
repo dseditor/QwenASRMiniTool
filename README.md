@@ -7,7 +7,10 @@
 > 目標很單純：讓你的同事、你的同學、你的阿嬤，都能免費、離線、在自己的電腦上做語音辨識。
 
 - 介面標題：**聲音辨識小工具**（貓耳耳機圖示）
-- 版本線：`webview 0.2`（與舊版 CustomTkinter 桌面版 `1.0.9` 分流並存，兩者互不干擾）
+- 版本：**2.0.0**
+- **自 2.0.0 起，WebView 版為唯一維護的版本**；舊的 CustomTkinter 桌面版停留在 `1.0.9`，
+  不再更新。兩者可並存於不同資料夾、共用同一份模型；舊版使用者按「檢查更新」會看到
+  遷移提示（**不會**覆蓋既有安裝，請解壓到新資料夾直接執行）。
 - 舊版桌面版（CustomTkinter）說明文件已移至 [`oldreadme.md`](oldreadme.md)
 
 ---
@@ -19,12 +22,14 @@
 - 🌊 **真實波形 + 播放頭 + 分段標註**：Suno 式波形，點波形／字幕／區塊即可跳播
 - 🎤 **卡拉OK逐字模式**：字級時間軸貫通，播放時逐字高亮歌詞（見下方截圖）
 - 🌏 **多語系辨識**：中文、日文、英文等 30 種語系，可自動偵測或鎖定語言
-- 🇯🇵 **日語強化（新）**：內建 **Qwen3-ASR-1.7B 日語動漫**特化模型，日文歌詞／台詞辨識明顯較佳；日語輸出保留原生漢字（不誤繁化）
+- 🇯🇵 **日語強化**：內建 **Qwen3-ASR-1.7B 日語動漫**特化模型，日文歌詞／台詞辨識明顯較佳；日語輸出保留原生漢字（不誤繁化）
+- 🇹🇼 **台灣國語強化（新）**：內建 **TEA-ASR-1.1** 特化模型，台灣用語／中英夾雜辨識更準，且**原生輸出繁體**（限乾淨人聲，見說明）
 - 👥 **說話者分離**：可指定人數，SRT 自動標記「說話者1／2…」
 - 💬 **辨識提示（參考文字）**：貼入歌詞、關鍵字或背景說明，提升辨識準確度
 - 📚 **批次辨識**：一次匯入大量音訊／影片，依序自動辨識
 - 🔌 **端點服務**：內建 OpenAI 相容轉錄 API + 手機掃碼上傳頁 + Cloudflare 對外通道
-- 🧩 **多推理核心**：CrispASR（Vulkan GPU）／OpenVINO（純 CPU）／chatllm（向下相容），可於「模型」頁切換
+- 🧩 **多推理核心**：CrispASR（GPU：Vulkan／CUDA 可選）／OpenVINO（純 CPU）／chatllm（向下相容），可於「模型」頁切換
+- ⚡ **加速版本自動推薦（新）**：偵測你的顯示卡後推薦最合適的 CrispASR build，NVIDIA 用戶可改選 CUDA
 - 🎨 **深淺色主題 + 介面縮放 + 多語介面**（繁中／简体／English）
 - 📦 **開箱即用**：CrispASR 核心與 VAD 隨包附帶；各模型／ffmpeg 按需自動下載
 
@@ -94,10 +99,24 @@
 切到「**模型**」分頁：
 
 - **系統自檢**：逐核心 × 逐能力列出檔案就緒狀況（綠＝已備、黃＝啟用時自動下載）
-- **推理核心**：可選 **Qwen** 或 **Whisper (Breeze)**；下方「模型」下拉依核心動態切換
+- **基礎／進階雙模式（新）**：預設為**基礎** —— 不必懂模型名稱，直接依「你要辨識什麼」挑：
+
+  | 用途 | 建議模型（依偵測到的硬體自動給量化）|
+  |------|------|
+  | **中文（標準）** | Qwen3-ASR-1.7B（無顯卡時改推純 CPU 的 0.6B）|
+  | **繁體中文 TEA（乾淨聲音）** | TEA-ASR-1.1 台灣國語 |
+  | **日本語** | Qwen3-ASR-1.7B 日語動漫 |
+  | **國台語混合（高速）** | Whisper Breeze-ASR-26 |
+
+  有獨立顯卡給最準的 Q8、只有內顯給較輕的 Q4／Q5。切到**進階**則維持原本的
+  「推理核心 ＋ 模型下拉 ＋ 裝置／加速版本／診斷」全手動介面。兩種模式共用同一顆
+  載入按鈕與同一份設定，切換不會產生不一致。
+- **推理核心**（進階）：可選 **Qwen** 或 **Whisper (Breeze)**；下方「模型」下拉依核心動態切換
 - **切換即重啟**：切核心／模型會持久化設定並提示重新啟動（避免就地切換 Vulkan context 造成當機）
 
-四張核心卡片：**Qwen · OpenVINO（CPU）**、**CRISPASR（Vulkan：Whisper/Breeze + Qwen）**、
+- **推理加速版本**：偵測顯示卡後推薦 CrispASR 的 Vulkan／CUDA／CPU build，可自行改選（換版本需重啟）
+
+四張核心卡片：**Qwen · OpenVINO（CPU）**、**CRISPASR（Whisper/Breeze + Qwen + TEA）**、
 **Qwen · chatllm（Vulkan · 相容）**、**共用元件（FFmpeg／說話者分離）**。
 
 ---
@@ -128,17 +147,39 @@
 
 本工具「模型驅動核心」—— 在「模型」頁選哪顆模型，就自動用對應的推理後端。
 
-### CRISPASR（Vulkan GPU）— 主力核心
+### CRISPASR（GPU）— 主力核心
 
 以 [CrispASR](https://github.com/CrispStrobe/CrispASR)（whisper.cpp 家族的多後端 runtime，ggml C++）
-走 **Vulkan** 加速，Windows 上通吃 NVIDIA／AMD／Intel，無須安裝 CUDA／ROCm。本版隨包 **CrispASR v0.8.8** 核心。
+加速推理，本版使用 **CrispASR v0.8.32** 核心。
+
+**推理加速版本可選**（模型頁「推理加速版本」）：程式會偵測你的顯示卡（Windows 的
+`Win32_VideoController` + `nvidia-smi`）後給出推薦，你可自行改選：
+
+| 加速版本 | 下載量 | 適用 |
+|---------|-------|------|
+| **Vulkan**（預設・建議）| 約 34 MB | NVIDIA／AMD／Intel 通吃，免裝 CUDA／ROCm；無獨顯時自動退回 CPU |
+| **CUDA 13** | 約 484 MB | NVIDIA 專用（需 580 以上驅動），自帶 CUDA runtime |
+| **CUDA 12** | 約 690 MB | NVIDIA 專用（較舊驅動），自帶 CUDA runtime |
+| **CPU** | 約 8 MB | 完全不碰顯卡，驅動有問題時的保底 |
+| **CPU 相容版** | 約 8 MB | 給不支援 AVX2 的老處理器（一般 CPU 版閃退時才需要）|
+
+> CrispASR 的 Windows 版沒有 ROCm／SYCL，因此 AMD 與 Intel 顯卡的最佳解就是 Vulkan；
+> 只有 NVIDIA 才多一條 CUDA 可選。實測（RTX 5090）Vulkan 與 CUDA 速度接近，故預設仍為
+> 體積最小的 Vulkan。換加速版本＝換核心，需重新啟動；模型檔不必重抓。
 
 | 模型 | 用途 |
 |------|------|
 | **Qwen3-ASR-1.7B Q4 / Q8** | 通用高辨識率，繁中斷句佳 |
-| **Qwen3-ASR-1.7B 日語動漫 Q4 / Q8**（新）| 日語／動漫特化，日文歌詞・台詞辨識明顯較佳 |
+| **Qwen3-ASR-1.7B 日語動漫 Q4 / Q8** | 日語／動漫特化，日文歌詞・台詞辨識明顯較佳 |
+| **TEA-ASR-1.1 台灣國語 Q8**（新）| 台灣國語／繁體中文／中英夾雜特化，**原生輸出繁體**（免簡繁轉換）。⚠️ 見下方適用範圍 |
 | **Whisper Breeze-ASR-26 Q4 / Q5 / Q8** | 繁中／台語特化（large-v2 等級）|
 | **qwen3 ForcedAligner GGUF** | 字級時間軸對齊（卡拉OK逐字、精準字幕）|
+
+> **TEA-ASR 的適用範圍**：它是「凍結音訊編碼器 ＋ 解碼器小 LoRA、不到 10 小時公開語料」的
+> 輕量微調（見[模型卡](https://huggingface.co/JacobLinCool/TEA-ASR-1.1)）。本專案實測：
+> **乾淨人聲**（訪談、質詢、講座）辨識最準且原生吐繁體；但**背景配樂較重的段落或歌曲**
+> 可能整段無輸出（模型直接結束生成）。此行為在未量化的 F16 版本同樣出現，**與量化無關**。
+> 音樂類素材請改用 Qwen3-ASR-1.7B（通用）或 Whisper Breeze。程式在模型下拉旁會顯示同樣的提醒。
 
 ### Qwen · OpenVINO（純 CPU）
 
@@ -165,6 +206,53 @@
 
 同時修正：**語言選日語時跳過 OpenCC 繁化**（原本會把日文漢字 会／静／図 誤轉成繁中字形 會／靜／圖），
 保留日文原生字形；中文／台語辨識維持繁化不變。
+
+---
+
+## 命令列模式（給 Agent／腳本）
+
+`QwenASR-WebView.exe` **帶子命令執行時是無頭 CLI**：不開視窗、跑完即退，
+stdout 只放結果、進度走 stderr，適合被 AI Agent 或批次腳本直接呼叫。
+不帶子命令則照舊開圖形介面。
+
+```bash
+QwenASR-WebView.exe status --json                  # 核心／模型／加速版本狀態
+QwenASR-WebView.exe profiles --json                # 可用模型（含硬體判斷）
+QwenASR-WebView.exe transcribe audio.mp3 --json    # 轉錄 → 乾淨 JSON
+QwenASR-WebView.exe apply fixed.json --base work.json -o final.srt
+```
+
+`transcribe` 的 JSON：
+
+```json
+{"input":"...","ok":true,"srtPath":"...\subtitles\audio.srt",
+ "segments":[{"i":1,"start":0.48,"end":1.84,"text":"再看立法院的質詢"}],
+ "text":"整段連續逐字稿"}
+```
+
+常用選項：`-l Chinese`（指定語言）、`--profile zh|tea|ja|twmix`（依用途換模型，
+**只影響這次執行**、不改 GUI 設定）、`--hint "人名、術語"`、`--diarize [--speakers N]`、
+`-o out.srt -f srt|txt|json`。退出碼 `0` 成功／`1` 轉錄失敗／`2` 參數錯誤。
+
+### 為什麼要有 `apply`
+
+讓 Agent 修字幕時**只准改 `text`**。若直接把整份 SRT 交給語言模型重寫，
+時間戳很容易被順手改壞且難以察覺。正確流程是三步：
+
+1. `transcribe ... -o work.json -f json` 取得 segments
+2. Agent 只改每個物件的 `text`，存成 `fixed.json`
+3. `apply fixed.json --base work.json -o final.srt`
+
+`--base` 以**原始檔的時間軸為準**、只依 `i` 回填文字 —— 就算 Agent 動到時間也會被蓋回去。
+沒帶 `--base` 且時間軸看起來退化（全零／倒退）時，CLI 會在 stderr 出聲警告。
+
+> 摘要／改寫由 Agent 自己做 —— 本工具只負責交出準確的逐字稿。
+
+### Claude Code Skill
+
+repo 內附 `.claude/skills/qwenasr/SKILL.md`，把上述用法（含各 profile 的
+適用情境與校正守則）教給 Agent。要讓任何專案的 Agent 都能用，複製到
+`~/.claude/skills/qwenasr/` 即可。
 
 ---
 
@@ -212,7 +300,8 @@ build_webview.bat              # 產出 dist2\QwenASR-WebView\QwenASR-WebView.ex
 | 項目 | 連結 |
 |------|------|
 | Qwen3-ASR-1.7B GGUF（CrispASR/Vulkan）| [cstr/qwen3-asr-1.7b-GGUF](https://huggingface.co/cstr/qwen3-asr-1.7b-GGUF) |
-| **Qwen3-ASR-1.7B 日語動漫 GGUF**（新）| [cstr/qwen3-asr-1.7b-ja-anime-GGUF](https://huggingface.co/cstr/qwen3-asr-1.7b-ja-anime-GGUF) |
+| **Qwen3-ASR-1.7B 日語動漫 GGUF** | [cstr/qwen3-asr-1.7b-ja-anime-GGUF](https://huggingface.co/cstr/qwen3-asr-1.7b-ja-anime-GGUF) |
+| **TEA-ASR-1.1 台灣國語 GGUF**（新）| [dseditor/TEA-ASR-1.1-CrispASR-GGUF](https://huggingface.co/dseditor/TEA-ASR-1.1-CrispASR-GGUF)（原始模型：[JacobLinCool/TEA-ASR-1.1](https://huggingface.co/JacobLinCool/TEA-ASR-1.1)）|
 | Whisper Breeze-ASR-26 GGML | [phate334/Breeze-ASR-26-GGML](https://huggingface.co/phate334/Breeze-ASR-26-GGML) |
 | qwen3 ForcedAligner GGUF | [cstr/qwen3-forced-aligner-0.6b-GGUF](https://huggingface.co/cstr/qwen3-forced-aligner-0.6b-GGUF) |
 | 0.6B OpenVINO INT8（主／備）| [dseditor](https://huggingface.co/dseditor/Qwen3-ASR-0.6B-INT8_ASYM-OpenVINO) ／ [Echo9Zulu](https://huggingface.co/Echo9Zulu/Qwen3-ASR-0.6B-INT8_ASYM-OpenVINO) |

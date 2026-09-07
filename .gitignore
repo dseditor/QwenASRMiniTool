@@ -107,7 +107,11 @@ UI.txt
 /root
 
 # ── 其他 ─────────────────────────────────────────────
-.claude/
+# .claude/ 內只有 skills/ 要進版控（給使用者的 Agent 用），其餘（settings.local.json
+# 等本機設定）不進。注意必須寫成 `.claude/*` 而非 `.claude/`——後者會讓 git 根本
+# 不進入該目錄，底下的 `!` 反向規則就永遠不會生效。
+.claude/*
+!.claude/skills/
 *.jpg
 *.png
 *.log

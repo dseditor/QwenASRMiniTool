@@ -131,6 +131,32 @@ def _pick_asset(assets: list[dict]) -> tuple[str, str] | None:
     return None
 
 
+def package_app_name(asset_name: str) -> str:
+    """從資產檔名推出它裝的是哪個應用程式。
+
+    兩條發行線的命名慣例一致，都是 `<應用名>_<版本>.<副檔名>`：
+        QwenASR_1.0.9.zip            → "QwenASR"
+        QwenASR-WebView_2.0.0.7z     → "QwenASR-WebView"
+    取第一個底線前的部分即可（版本號本身不含底線）。
+    """
+    stem = Path(asset_name).stem            # 去副檔名（.7z/.zip）
+    return stem.split("_", 1)[0]
+
+
+def is_migration_package(asset_name: str) -> bool:
+    """該資產是否屬於「另一個應用程式」（＝需要遷移而非就地更新）。
+
+    2.0.0 起 WebView 取代 CTk 成為主線，兩者的執行檔名不同
+    （QwenASR.exe ↔ QwenASR-WebView.exe）。若讓 CTk 的自動更新照常執行，
+    apply_update 會把 WebView 的檔案疊進 CTk 的安裝夾、然後**重新啟動舊的
+    QwenASR.exe** —— 使用者更新完看到的還是舊程式，資料夾卻多了一堆檔案。
+    故此處先攔下來，改走「提示使用者手動下載」的遷移路徑。
+    """
+    if not asset_name:
+        return False
+    return package_app_name(asset_name).lower() != Path(exe_name()).stem.lower()
+
+
 def check_latest(timeout: int = 15) -> dict:
     """查詢最新 Release，回傳資訊字典。
 
@@ -151,6 +177,8 @@ def check_latest(timeout: int = 15) -> dict:
         "latest_tag": "", "latest_name": "", "body": "",
         "has_update": False, "asset_name": None, "asset_url": None,
         "html_url": GITHUB_RELEASES_PAGE,
+        # 遷移模式：最新版屬於另一個應用程式（WebView 取代 CTk）→ 不自動更新
+        "migration": False, "migration_note": "",
     }
     try:
         req = urllib.request.Request(
@@ -177,7 +205,19 @@ def check_latest(timeout: int = 15) -> dict:
     })
     picked = _pick_asset(data.get("assets", []))
     if picked:
-        info["asset_name"], info["asset_url"] = picked
+        name, url = picked
+        if is_migration_package(name):
+            # 不同應用程式的套件 → 不提供自動更新，改請使用者手動下載安裝。
+            # 刻意把 asset_url 留成 None：既有 UI 已有「無可自動更新的套件 →
+            # 禁用『立即更新』」的分支，直接沿用那條已驗證過的路徑。
+            info["migration"] = True
+            info["migration_note"] = (
+                f"這是全新的「{package_app_name(name)}」版本，不會覆蓋你現有的安裝。\n"
+                f"請點「發行頁」下載 {name}，解壓到一個**新的資料夾**後直接執行；\n"
+                f"舊版可保留，模型與設定不受影響。"
+            )
+        else:
+            info["asset_name"], info["asset_url"] = name, url
     return info
 
 
@@ -250,11 +290,13 @@ def _find_app_root(extracted: Path) -> Path:
     for p in extracted.rglob("*"):
         if p.is_file() and p.name.lower() == target:
             return p.parent
-    # 找不到 exe（可能是開發測試 zip），退回第一層唯一子資料夾
-    subdirs = [d for d in extracted.iterdir() if d.is_dir()]
-    if len(subdirs) == 1:
-        return subdirs[0]
-    return extracted
+    # 找不到自己的主執行檔 → 這包不是「本程式的新版」。以前這裡會退回「第一層
+    # 唯一子資料夾」照樣覆蓋，結果是把別的應用程式的檔案疊進來、再重啟舊 exe。
+    # 改為明確拒絕：縱深防禦，即使前面的 is_migration_package 判斷漏掉也擋得住。
+    raise RuntimeError(
+        f"這個更新套件裡沒有 {exe_name()}，看起來是另一個版本的程式。\n"
+        "為避免覆蓋你現有的安裝，已停止自動更新——請到發行頁手動下載。"
+    )
 
 
 # ── 套用更新（產生 helper bat 後結束本程式）──────────────────────────

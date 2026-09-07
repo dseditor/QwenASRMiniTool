@@ -255,6 +255,25 @@
         </div>
         <div id="health-panel" class="health-panel"></div>
 
+        <div class="sec-title" style="display:flex;align-items:center;gap:10px">
+          <span data-i18n="model.pick">選擇模型</span>
+          <div class="seg" id="model-mode" style="margin-left:auto">
+            <button class="on" data-v="basic" data-i18n="model.modeBasic">基礎</button><button data-v="advanced" data-i18n="model.modeAdv">進階</button>
+          </div>
+        </div>
+
+        <!-- ── 基礎模式：選用途 → 依硬體給建議模型 ── -->
+        <div id="basic-pane">
+          <div class="banner banner-info" id="basic-hw" style="margin-bottom:12px">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+            <div>偵測硬體中…</div>
+          </div>
+          <div class="radio-cards" id="basic-profiles"></div>
+          <div id="basic-note" class="banner banner-warn" hidden style="margin-top:10px"></div>
+        </div>
+
+        <!-- ── 進階模式：原本的核心 + 模型下拉 ── -->
+        <div id="advanced-pane" hidden>
         <div class="sec-title" data-i18n="model.core">推理核心</div>
         <div class="radio-cards" id="core-cards"></div>
         <div class="model-pick" style="display:flex;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap">
@@ -263,6 +282,8 @@
           <span class="chip chip-muted" id="model-arch"></span>
         </div>
         <div id="model-note" class="banner banner-warn" hidden style="margin-top:10px"></div>
+        </div><!-- /advanced-pane -->
+
         <div id="model-msg"></div>
 
         <div class="model-load-row" style="display:flex;align-items:center;gap:12px;margin-top:12px">
@@ -273,17 +294,27 @@
           </div>
         </div>
 
+        <div id="advanced-extra" hidden>
         <div class="sec-title" data-i18n="model.devices">偵測到的裝置</div>
         <div class="dev-list" id="dev-list">
           <div class="dev"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg></span><span class="nm">CPU · AMD Ryzen 5 9600X 6-Core</span><span class="vram">使用中</span></div>
           <div class="dev"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 18v2M18 18v2"/></svg></span><span class="nm">GPU · NVIDIA GeForce RTX 4070</span><span class="vram">8.0 GB 可用</span></div>
         </div>
 
+        <div class="sec-title" data-i18n="model.accel">推理加速版本</div>
+        <div class="banner banner-info" id="accel-reason" hidden style="margin-bottom:10px">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+          <div></div>
+        </div>
+        <div class="radio-cards" id="accel-cards"></div>
+        <div id="accel-msg"></div>
+
         <div class="sec-title" data-i18n="model.diag">診斷</div>
         <div class="banner banner-warn" id="gpu-diag">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
           <div>GPU 偵測由 <code style="font-family:var(--font-mono)">crispasr.exe --diagnostics</code> 進行；若未列出獨立顯示卡，請更新顯卡 / Vulkan 驅動後重試。</div>
         </div>
+        </div><!-- /advanced-extra -->
       </section>
 
       <!-- ───── 設定 ───── -->

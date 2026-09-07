@@ -209,7 +209,10 @@ class SettingsTab(ctk.CTkScrollableFrame):
         msg = f"🎉 發現新版本 {latest}"
         if body_short:
             msg += f"\n更新說明：{body_short}"
-        if not info.get("asset_url"):
+        if info.get("migration"):
+            # 2.0.0 起 WebView 取代 CTk：套件屬於另一個程式，不能就地覆蓋
+            msg += "\n" + info["migration_note"]
+        elif not info.get("asset_url"):
             msg += "\n（此版本未附可自動更新的套件，請手動下載）"
         self._set_upd_status(msg, color=("#1d4ed8", "#93c5fd"))
 

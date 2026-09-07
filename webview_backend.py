@@ -44,11 +44,15 @@ _CHATLLM_AMD_NOTE = ("⚠️ chatllm 核心在部分 AMD 內顯／APU 有已知�
 _MODEL_CATALOG = [
     ("Qwen", "Qwen3-ASR-0.6B",              "openvino", {"cpu_model_size": "0.6B"}),
     ("Qwen", "Qwen3-ASR-1.7B INT8",         "openvino", {"cpu_model_size": "1.7B"}),
-    ("Qwen", "Qwen3-ASR-1.7B Q4 (CRISPASR/Vulkan)", "crispasr", {"crisp_model": "qwen3", "crisp_qwen_quant": "q4"}),
-    ("Qwen", "Qwen3-ASR-1.7B Q8 (CRISPASR/Vulkan)", "crispasr", {"crisp_model": "qwen3", "crisp_qwen_quant": "q8"}),
+    ("Qwen", "Qwen3-ASR-1.7B Q4 (CRISPASR)", "crispasr", {"crisp_model": "qwen3", "crisp_qwen_quant": "q4"}),
+    ("Qwen", "Qwen3-ASR-1.7B Q8 (CRISPASR)", "crispasr", {"crisp_model": "qwen3", "crisp_qwen_quant": "q8"}),
     # 日語動漫特化（cstr/qwen3-asr-1.7b-ja-anime）：同架構、針對日語微調，日文歌詞/台詞辨識較佳。
-    ("Qwen", "Qwen3-ASR-1.7B 日語動漫 Q4 (CRISPASR/Vulkan)", "crispasr", {"crisp_model": "qwen3-ja", "crisp_qwen_quant": "q4"}),
-    ("Qwen", "Qwen3-ASR-1.7B 日語動漫 Q8 (CRISPASR/Vulkan)", "crispasr", {"crisp_model": "qwen3-ja", "crisp_qwen_quant": "q8"}),
+    ("Qwen", "Qwen3-ASR-1.7B 日語動漫 Q4 (CRISPASR)", "crispasr", {"crisp_model": "qwen3-ja", "crisp_qwen_quant": "q4"}),
+    ("Qwen", "Qwen3-ASR-1.7B 日語動漫 Q8 (CRISPASR)", "crispasr", {"crisp_model": "qwen3-ja", "crisp_qwen_quant": "q8"}),
+    # 台灣國語特化（JacobLinCool/TEA-ASR-1.1，Qwen3-ASR-1.7B 微調）：繁中／台灣用語／
+    # 中英夾雜。HF 上現成的 mradermacher GGUF 是 llama.cpp mmproj 拆檔版、CrispASR
+    # 讀不了，故本專案自行以 CrispASR 官方轉換器重轉為單檔融合式 GGUF（見 downloader）。
+    ("Qwen", "TEA-ASR-1.1 台灣國語 Q8 (CRISPASR)", "crispasr", {"crisp_model": "tea", "crisp_qwen_quant": "q8"}),
     # chatllm（相容項）：永遠在目錄中（供 set_model 查得），但 get_model_options
     # 會依 _chatllm_available 決定是否實際呈現給前端。
     ("Qwen", _CHATLLM_LABEL,                "chatllm",  {}),
@@ -57,13 +61,88 @@ _MODEL_CATALOG = [
     ("Whisper (Breeze)", "Breeze Q8 (精確)", "crispasr", {"crisp_model": "breeze", "crisp_quant": "q8"}),
 ]
 _BREEZE_QUANT_LABEL = {"q4": "Breeze Q4 (輕量)", "q5": "Breeze Q5 (標準)", "q8": "Breeze Q8 (精確)"}
-_QWEN_CASR_QUANT_LABEL = {"q4": "Qwen3-ASR-1.7B Q4 (CRISPASR/Vulkan)",
-                          "q8": "Qwen3-ASR-1.7B Q8 (CRISPASR/Vulkan)"}
-_QWEN_JA_CASR_QUANT_LABEL = {"q4": "Qwen3-ASR-1.7B 日語動漫 Q4 (CRISPASR/Vulkan)",
-                             "q8": "Qwen3-ASR-1.7B 日語動漫 Q8 (CRISPASR/Vulkan)"}
+_QWEN_CASR_QUANT_LABEL = {"q4": "Qwen3-ASR-1.7B Q4 (CRISPASR)",
+                          "q8": "Qwen3-ASR-1.7B Q8 (CRISPASR)"}
+_QWEN_JA_CASR_QUANT_LABEL = {"q4": "Qwen3-ASR-1.7B 日語動漫 Q4 (CRISPASR)",
+                             "q8": "Qwen3-ASR-1.7B 日語動漫 Q8 (CRISPASR)"}
+_TEA_CASR_QUANT_LABEL = {"q8": "TEA-ASR-1.1 台灣國語 Q8 (CRISPASR)"}
+# TEA-ASR 是「凍結音訊編碼器 ＋ 解碼器小 LoRA、不到 10 小時公開語料」的輕量微調
+# （見模型卡）。實測（crispasr / q8_0 與未量化 f16 結果一致，故非量化所致）：
+#   • 乾淨人聲：辨識最佳，且**原生輸出繁體**（免簡繁轉換）
+#   • 配樂較重的段落／歌曲：該段可能整段無輸出（模型直接吐 EOS）
+# 這是模型的域外行為，不是包裝層可修的，故如實標示讓使用者自行選材。
+_TEA_DOMAIN_NOTE = ("⚠️ TEA-ASR 為「台灣國語日常人聲」特化模型：乾淨人聲最準且原生輸出繁體，"
+                    "但背景配樂較重的段落或歌曲可能整段無輸出。音樂類素材請改用 "
+                    "Qwen3-ASR-1.7B（通用）或 Whisper Breeze。")
+# 模型標籤 → 提醒文字（目前只有 TEA 有；chatllm 的提醒仍依 backend 給）
+_MODEL_NOTES = {_TEA_CASR_QUANT_LABEL["q8"]: _TEA_DOMAIN_NOTE}
+
+# ══════════════════════════════════════════════════════════════════════
+# 基礎模式：用「用途」而非「模型名」讓使用者選
+# ══════════════════════════════════════════════════════════════════════
+#   模型頁分兩種模式（預設基礎）：
+#     基礎(basic)   → 選用途 → 依偵測到的硬體給出建議模型 → 按同一顆載入鈕
+#     進階(advanced)→ 維持原本的「核心 + 模型下拉」全手動介面
+#   兩者共用同一個 set_model / request_load 管道，故不會有狀態不一致。
+#
+# 硬體分級（tier）決定同一用途要給哪個量化：
+#   gpu  = 有獨立顯卡（NVIDIA／AMD 獨顯）→ 給最準的 Q8
+#   igpu = 只有內顯（Intel／AMD APU）    → 給較輕的 Q4／Q5
+#   cpu  = 完全沒偵測到顯示卡            → 中文用途改推 OpenVINO 0.6B（純 CPU 主場）
+_BASIC_PROFILES = [
+    {
+        "key":   "zh",
+        "title": "中文（標準）",
+        "desc":  "一般用途首選：中文為主、斷句與標點最完整，長影片／會議／訪談都適用。",
+        "picks": {
+            "gpu":  ("Qwen", _QWEN_CASR_QUANT_LABEL["q8"]),
+            "igpu": ("Qwen", _QWEN_CASR_QUANT_LABEL["q4"]),
+            "cpu":  ("Qwen", "Qwen3-ASR-0.6B"),
+        },
+    },
+    {
+        "key":   "tea",
+        "title": "繁體中文 TEA（乾淨聲音）",
+        "desc":  "台灣國語特化：原生輸出繁體與台灣用語，中英夾雜也保得住。"
+                 "限乾淨人聲（訪談、質詢、講座）。",
+        "note":  _TEA_DOMAIN_NOTE,
+        "picks": {
+            "gpu":  ("Qwen", _TEA_CASR_QUANT_LABEL["q8"]),
+            "igpu": ("Qwen", _TEA_CASR_QUANT_LABEL["q8"]),
+            "cpu":  ("Qwen", _TEA_CASR_QUANT_LABEL["q8"]),
+        },
+    },
+    {
+        "key":   "ja",
+        "title": "日本語",
+        "desc":  "日語／動漫特化：日文歌詞與台詞辨識明顯較佳，且輸出保留日文原生漢字"
+                 "（不會被誤轉成繁體字形）。",
+        "picks": {
+            "gpu":  ("Qwen", _QWEN_JA_CASR_QUANT_LABEL["q8"]),
+            "igpu": ("Qwen", _QWEN_JA_CASR_QUANT_LABEL["q4"]),
+            "cpu":  ("Qwen", _QWEN_JA_CASR_QUANT_LABEL["q4"]),
+        },
+    },
+    {
+        "key":   "twmix",
+        "title": "國台語混合（高速）",
+        "desc":  "Whisper Breeze-ASR-26：繁中／台語特化且速度極快，適合大量批次。"
+                 "模型不輸出標點，字幕改以長度切行（斷句較平）。",
+        "picks": {
+            "gpu":  ("Whisper (Breeze)", _BREEZE_QUANT_LABEL["q8"]),
+            "igpu": ("Whisper (Breeze)", _BREEZE_QUANT_LABEL["q5"]),
+            "cpu":  ("Whisper (Breeze)", _BREEZE_QUANT_LABEL["q5"]),
+        },
+    },
+]
+# 沒有顯示卡時，非中文用途只剩 GGUF 模型可用 → 據實提醒會比較慢
+_BASIC_CPU_SLOW_NOTE = ("此用途沒有純 CPU 的專用模型，將以 CrispASR 在處理器上執行，"
+                        "速度會明顯較慢；若可接受請直接下載，或改選「中文（標準）」。")
 # crispasr-Qwen 系列的 crisp_model 值（皆走 --backend qwen3-1.7b、同置 ov_models/、
 # 共用 crisp_qwen_quant，差別只在權重與下載來源）。"breeze" 不在此列。
-_QWEN_CASR_MODELS = ("qwen3", "qwen3-ja")
+_QWEN_CASR_MODELS = ("qwen3", "qwen3-ja", "tea")
+# 各 crispasr-Qwen 模型在下載訊息中的中文註記
+_QWEN_CASR_NOTE = {"qwen3-ja": "（日語動漫）", "tea": "（台灣國語）"}
 
 
 def _qwen_casr_dl(crisp_model: str):
@@ -71,14 +150,20 @@ def _qwen_casr_dl(crisp_model: str):
 
     qwen3     → 標準 Qwen3-ASR-1.7B（cstr/qwen3-asr-1.7b-GGUF）
     qwen3-ja  → 日語動漫特化（cstr/qwen3-asr-1.7b-ja-anime-GGUF）
-    讓所有「crispasr-Qwen」路徑共用一處分派，避免 qwen3/qwen3-ja 分支散落各方法。
+    tea       → 台灣國語特化（TEA-ASR-1.1，本專案自轉的融合式 GGUF）
+    讓所有「crispasr-Qwen」路徑共用一處分派，避免各模型分支散落各方法。
     """
     from downloader import (qwen3_asr_gguf_filename, quick_check_qwen3_asr_gguf,
                             download_qwen3_asr_gguf, qwen3_asr_ja_gguf_filename,
-                            quick_check_qwen3_asr_ja_gguf, download_qwen3_asr_ja_gguf)
+                            quick_check_qwen3_asr_ja_gguf, download_qwen3_asr_ja_gguf,
+                            tea_asr_gguf_filename, quick_check_tea_asr_gguf,
+                            download_tea_asr_gguf)
     if crisp_model == "qwen3-ja":
         return (qwen3_asr_ja_gguf_filename, quick_check_qwen3_asr_ja_gguf,
                 download_qwen3_asr_ja_gguf)
+    if crisp_model == "tea":
+        return (tea_asr_gguf_filename, quick_check_tea_asr_gguf,
+                download_tea_asr_gguf)
     return (qwen3_asr_gguf_filename, quick_check_qwen3_asr_gguf,
             download_qwen3_asr_gguf)
 
@@ -341,18 +426,21 @@ class WebBackend:
         from downloader import (quick_check_crispasr, download_crispasr_core,
                                 quick_check_breeze, download_breeze, breeze_filename,
                                 quick_check_aligner_gguf, download_aligner_gguf,
-                                aligner_gguf_filename)
+                                aligner_gguf_filename, crispasr_gpu_backend)
         s = self._settings_raw()
         crispasr_dir = self._crispasr_dir()
-        crisp_model = s.get("crisp_model", "breeze")     # breeze / qwen3
+        crisp_model = s.get("crisp_model", "breeze")     # breeze / qwen3 / qwen3-ja / tea
         quant = s.get("crisp_quant", "q5")
         fa_enabled = bool(s.get("crisp_fa", True))
         fa_quant = s.get("crisp_fa_quant", "q5")
+        variant = self._crisp_variant()                  # 加速版本（vulkan/cuda…）
 
-        # crispasr.exe 核心一律需要
-        if not quick_check_crispasr(crispasr_dir):
-            self._st("下載 CrispASR 核心（約 27 MB）…")
-            download_crispasr_core(crispasr_dir, progress_cb=self._dl_progress)
+        # crispasr.exe 核心一律需要。帶 variant 檢查 → 版本升級或使用者改選
+        # 加速版本時都會判定為「不就緒」而重新下載對應的 zip。
+        if not quick_check_crispasr(crispasr_dir, variant):
+            self._st("下載 CrispASR 核心…")
+            download_crispasr_core(crispasr_dir, progress_cb=self._dl_progress,
+                                   variant=variant)
 
         if crisp_model in _QWEN_CASR_MODELS:
             # Qwen3-ASR GGUF（與 OV 模型同置 ov_models/；crisp_engine 依檔名含 "1.7b"
@@ -364,8 +452,9 @@ class WebBackend:
                                                             BASE_DIR / "ov_models"))))
             model_path = model_dir / fname_fn(qquant)
             if not check_fn(model_dir, qquant):
-                _ja = "（日語動漫）" if crisp_model == "qwen3-ja" else ""
-                self._st(f"下載 Qwen3-ASR-1.7B{_ja} {qquant.upper()} GGUF…")
+                _note = _QWEN_CASR_NOTE.get(crisp_model, "")
+                _name = "TEA-ASR-1.1" if crisp_model == "tea" else "Qwen3-ASR-1.7B"
+                self._st(f"下載 {_name}{_note} {qquant.upper()} GGUF…")
                 download_fn(model_dir, qquant, progress_cb=self._dl_progress)
         else:
             model_path = crispasr_dir / breeze_filename(quant)
@@ -385,7 +474,8 @@ class WebBackend:
                     aligner_path = None       # 退回 Whisper 自帶時間軸
         eng = CrispWhisperEngine()
         eng.load(model_path=model_path, crispasr_dir=crispasr_dir,
-                 device_id=self._vk_device_id(s), cb=self._st, aligner_path=aligner_path)
+                 device_id=self._vk_device_id(s), cb=self._st, aligner_path=aligner_path,
+                 gpu_backend=crispasr_gpu_backend(variant))
         self.engine = eng
 
     # ── 狀態 ────────────────────────────────────────────────
@@ -395,7 +485,7 @@ class WebBackend:
             "modelReady": bool(getattr(self.engine, "ready", False)),
             "loading": self._loading,
             "error": self._load_err,
-            "backend": self._BACKEND_LABELS.get(active, "CPU · OpenVINO INT8"),
+            "backend": self._backend_label(active, "CPU · OpenVINO INT8"),
             "backendKey": self._persisted_backend(),       # 已記住的核心選擇
             "activeBackend": active,                        # 實際載入中的核心
             "device": "GPU" if active in ("chatllm", "crispasr") else "CPU",
@@ -443,7 +533,8 @@ class WebBackend:
         """機器上是否已有任一可用模型（任一核心任一量化）。供首啟頁面決策。"""
         try:
             from downloader import (quick_check, quick_check_1p7b, quick_check_breeze,
-                                    quick_check_qwen3_asr_gguf, quick_check_qwen3_asr_ja_gguf)
+                                    quick_check_qwen3_asr_gguf, quick_check_qwen3_asr_ja_gguf,
+                                    quick_check_tea_asr_gguf)
             model_dir = self._model_dir()
             crispasr_dir = self._crispasr_dir()
             if quick_check(model_dir) or quick_check_1p7b(model_dir):
@@ -454,6 +545,8 @@ class WebBackend:
             for q in ("q4", "q8"):
                 if quick_check_qwen3_asr_gguf(model_dir, q) or quick_check_qwen3_asr_ja_gguf(model_dir, q):
                     return True
+            if quick_check_tea_asr_gguf(model_dir, "q8"):
+                return True
             # chatllm .bin（向下相容）
             if (self._chatllm_dir() / "qwen3-asr-1.7b.bin").exists():
                 return True
@@ -734,6 +827,67 @@ class WebBackend:
         app_dir = getattr(core, "BASE_DIR", BASE_DIR)
         return Path(s.get("crispasr_dir", str(app_dir / "crispasr")))
 
+    # ── 推理加速版本（CrispASR 的 Vulkan / CUDA / CPU 三種 build）────────
+    #   偵測→推薦→下載對應 zip。注意這裡的硬體偵測**不能**用既有的
+    #   probe_crispasr_devices()（那要先有 crispasr.exe），而走 downloader 的
+    #   detect_hardware()（WMI + nvidia-smi），才能在下載核心前就決定抓哪一包。
+    def _crisp_variant(self) -> str:
+        """目前選定的加速版本；settings 沒有就依硬體推薦一個並記住。"""
+        from downloader import (crispasr_variants, recommend_crispasr_variant)
+        s = self._settings_raw()
+        v = s.get("crisp_variant")
+        if v in crispasr_variants():
+            return v
+        try:
+            v = recommend_crispasr_variant()["recommended"]
+        except Exception:
+            v = "vulkan"
+        self._persist_setting("crisp_variant", v)
+        return v
+
+    def get_accel(self) -> dict:
+        """回傳硬體偵測結果 + 加速版本選單（供前端「推理加速版本」區塊渲染）。"""
+        from downloader import (recommend_crispasr_variant, installed_crispasr_info,
+                                _CRISPASR_VERSION)
+        try:
+            info = recommend_crispasr_variant()
+        except Exception as e:
+            traceback.print_exc()
+            return {"ok": False, "error": f"硬體偵測失敗：{e}", "options": []}
+        installed = installed_crispasr_info(self._crispasr_dir())
+        selected  = self._crisp_variant()
+        return {
+            "ok": True,
+            "selected": selected,
+            "recommended": info["recommended"],
+            "reason": info["reason"],
+            "options": info["options"],
+            "hardware": info["hardware"],
+            "installed": installed,          # {"version","variant"}；None＝尚未安裝
+            "latest": _CRISPASR_VERSION,
+            # 已裝但版本／版本別不符 → 前端提示「載入時會自動重新下載」
+            "needsDownload": (installed.get("version") != _CRISPASR_VERSION
+                              or installed.get("variant") != selected),
+        }
+
+    def set_accel(self, variant: str) -> dict:
+        """記住使用者選的加速版本。實際下載發生在下次載入模型時。"""
+        from downloader import crispasr_variants, installed_crispasr_info, _CRISPASR_VERSION
+        variants = crispasr_variants()
+        if variant not in variants:
+            return {"ok": False, "message": f"未知的加速版本：{variant}"}
+        self._persist_setting("crisp_variant", variant)
+        meta = variants[variant]
+        installed = installed_crispasr_info(self._crispasr_dir())
+        fresh = (installed.get("version") == _CRISPASR_VERSION
+                 and installed.get("variant") == variant)
+        if fresh:
+            return {"ok": True, "variant": variant, "restartRequired": False,
+                    "message": f"已選用「{meta['label']}」（核心已就緒）。"}
+        return {"ok": True, "variant": variant, "restartRequired": True,
+                "message": (f"已記住「{meta['label']}」。下次載入模型時會下載該版本"
+                            f"核心（約 {meta['size_mb']} MB），請重新啟動程式以套用。")}
+
     def list_devices(self) -> dict:
         import platform
         devices = [{"kind": "cpu", "name": platform.processor() or "CPU", "note": "使用中"}]
@@ -790,12 +944,41 @@ class WebBackend:
     _BACKEND_LABELS = {
         "openvino": "CPU · OpenVINO INT8",
         "chatllm":  "GPU · chatllm Vulkan",
-        "crispasr": "GPU · CRISPASR（Vulkan）",
+        # CRISPASR 的加速版本可切（Vulkan/CUDA/CPU）→ 實際標籤由 _backend_label()
+        # 依 crisp_variant 補上；這裡只留字典的預設值供舊呼叫端使用。
+        "crispasr": "GPU · CRISPASR",
     }
+
+    @staticmethod
+    def _note_for(backend: str, model_label: str = "") -> str:
+        """該（核心, 模型）要顯示的提醒文字；沒有則空字串。
+
+        chatllm 依 backend 給（AMD 內顯問題），TEA 等依模型標籤給（模型域限制）。
+        """
+        if backend == "chatllm":
+            return _CHATLLM_AMD_NOTE
+        return _MODEL_NOTES.get(model_label, "")
+
+    def _backend_label(self, backend: str, fallback: str = "") -> str:
+        """核心顯示名。CRISPASR 會補上目前選定的加速版本（Vulkan／CUDA／CPU）。"""
+        label = self._BACKEND_LABELS.get(backend)
+        if label is None:
+            return fallback or backend
+        if backend == "crispasr":
+            try:
+                from downloader import crispasr_variants
+                v = self._crisp_variant()
+                meta = crispasr_variants().get(v)
+                if meta:
+                    kind = "CPU" if meta["gpu_backend"] is None else "GPU"
+                    return f"{kind} · CRISPASR（{meta.get('short') or meta['label']}）"
+            except Exception:
+                pass
+        return label
 
     def set_backend(self, idx) -> dict:
         backend = self._BACKENDS.get(int(idx) if str(idx).isdigit() else 0, "openvino")
-        label = self._BACKEND_LABELS.get(backend, backend)
+        label = self._backend_label(backend)
         self._persist_backend(backend)
         active = getattr(self, "_active_backend", "openvino")
         if backend == active:
@@ -836,7 +1019,8 @@ class WebBackend:
             cm = s.get("crisp_model", "breeze")
             quant = (s.get("crisp_quant", "q5") if cm == "breeze"
                      else s.get("crisp_qwen_quant", "q8"))   # qwen3 量化也納入識別
-            return ("crispasr", cm, quant)
+            # 加速版本也納入識別：換 Vulkan↔CUDA 等同換核心，需重啟才生效
+            return ("crispasr", cm, quant, self._crisp_variant())
         return ("chatllm",)
 
     def _current_selection(self):
@@ -845,6 +1029,8 @@ class WebBackend:
         be = s.get("backend", "openvino")
         if be == "crispasr":
             cm = s.get("crisp_model", "breeze")
+            if cm == "tea":
+                return ("Qwen", _TEA_CASR_QUANT_LABEL["q8"])
             if cm == "qwen3-ja":
                 qq = s.get("crisp_qwen_quant", "q8")
                 return ("Qwen", _QWEN_JA_CASR_QUANT_LABEL.get(qq, _QWEN_JA_CASR_QUANT_LABEL["q8"]))
@@ -879,6 +1065,92 @@ class WebBackend:
             pass
         return False
 
+    # ── 基礎模式：用途 → 依硬體建議模型 ────────────────────────────────
+    def _hw_tier(self) -> tuple[str, str]:
+        """回傳 (tier, 硬體摘要文字)。tier ∈ gpu / igpu / cpu。
+
+        tier 決定基礎模式要推薦哪個量化：有獨顯給最準的 Q8，只有內顯給較輕的
+        Q4／Q5，完全沒顯示卡則中文用途改推純 CPU 的 OpenVINO 0.6B。
+        """
+        from downloader import detect_hardware
+        try:
+            hw = detect_hardware()
+        except Exception:
+            return "igpu", "無法偵測顯示卡，以一般配備為準給建議。"
+        gpus = hw.get("gpus") or []
+        if not gpus:
+            return "cpu", "未偵測到顯示卡 —— 以純處理器（CPU）推理為準給建議。"
+        names = "、".join(g["name"] for g in gpus)
+        if hw.get("has_discrete"):
+            return "gpu", f"偵測到獨立顯示卡：{names} —— 可用最準的模型。"
+        return "igpu", f"偵測到內建顯示晶片：{names} —— 建議用較輕量的模型。"
+
+    def _present_for(self, backend: str, patch: dict) -> bool:
+        """某個目錄項（backend + settings patch）的模型檔是否已下載。
+
+        與 selected_model_present() 同樣的判斷，但改吃「任意一項」而非目前選定的，
+        供基礎模式在卡片上標示「已下載／需下載」。
+        """
+        try:
+            from downloader import (quick_check, quick_check_1p7b, quick_check_breeze)
+            model_dir = self._model_dir()
+            if backend == "openvino":
+                return (quick_check_1p7b(model_dir)
+                        if "1.7B" in patch.get("cpu_model_size", "0.6B")
+                        else quick_check(model_dir))
+            if backend == "crispasr":
+                cm = patch.get("crisp_model", "breeze")
+                if cm in _QWEN_CASR_MODELS:
+                    _, check_fn, _ = _qwen_casr_dl(cm)
+                    return check_fn(model_dir, patch.get("crisp_qwen_quant", "q8"))
+                return quick_check_breeze(self._crispasr_dir(),
+                                          patch.get("crisp_quant", "q5"))
+            if backend == "chatllm":
+                return ((self._chatllm_dir() / "qwen3-asr-1.7b.bin").exists()
+                        or (model_dir / "qwen3-asr-1.7b.bin").exists())
+        except Exception:
+            traceback.print_exc()
+        return False
+
+    def get_basic_profiles(self) -> dict:
+        """基礎模式的用途清單（已套用硬體建議）。
+
+        回傳 {"tier","hardware","accel","profiles":[…],"current"}；每個 profile 帶
+        它在本機硬體下建議的 (core, model) 與該模型是否已下載。前端點選後仍走
+        既有的 set_model()／request_load()，不另開載入路徑。
+        """
+        from downloader import crispasr_variants
+        tier, hw_text = self._hw_tier()
+        cur_core, cur_model = self._current_selection()
+        variant = self._crisp_variant()
+        vmeta = crispasr_variants().get(variant, {})
+
+        profiles = []
+        for p in _BASIC_PROFILES:
+            core_label, model_label = p["picks"].get(tier, p["picks"]["igpu"])
+            entry = next((e for e in _MODEL_CATALOG
+                          if e[0] == core_label and e[1] == model_label), None)
+            if entry is None:            # 目錄改名時不要整頁壞掉，跳過該用途
+                continue
+            _, _, be, patch = entry
+            note = p.get("note", "")
+            if tier == "cpu" and be != "openvino":
+                note = (note + "　" if note else "") + _BASIC_CPU_SLOW_NOTE
+            profiles.append({
+                "key": p["key"], "title": p["title"], "desc": p["desc"],
+                "note": note,
+                "core": core_label, "model": model_label,
+                "arch": self._backend_label(be, be),
+                "present": self._present_for(be, patch),
+                "selected": (core_label == cur_core and model_label == cur_model),
+            })
+        return {
+            "tier": tier, "hardware": hw_text,
+            "accel": vmeta.get("short") or vmeta.get("label") or variant,
+            "profiles": profiles,
+            "current": {"core": cur_core, "model": cur_model},
+        }
+
     def get_model_options(self) -> dict:
         """核心/模型階層 + 目前選擇 + 每模型對應架構標籤（前端渲染下拉用）。
 
@@ -895,14 +1167,14 @@ class WebBackend:
                 order.append(core_label)
             by_core[core_label].append({
                 "label": model_label, "backend": be,
-                "arch": self._BACKEND_LABELS.get(be, be),
-                "note": _CHATLLM_AMD_NOTE if be == "chatllm" else "",
+                "arch": self._backend_label(be, be),
+                "note": self._note_for(be, model_label),
             })
         active = getattr(self, "_active_backend", None)
         return {
             "cores": [{"label": c, "models": by_core[c]} for c in order],
             "current": {"core": cur_core, "model": cur_model},
-            "activeArch": self._BACKEND_LABELS.get(active, "") if active else "",
+            "activeArch": self._backend_label(active, "") if active else "",
         }
 
     def set_model(self, core_label: str, model_label: str) -> dict:
@@ -926,7 +1198,7 @@ class WebBackend:
         except Exception:
             pass
 
-        arch = self._BACKEND_LABELS.get(backend, backend)
+        arch = self._backend_label(backend, backend)
         # 尚未載入任何核心（首次啟動）→ 可「就地下載並載入」，免重啟（此時沒有
         # 既有 Vulkan context 會衝突，安全）。已載入核心後再換 → 仍需重啟（safety）。
         loaded_or_loading = self._loaded or self._loading
@@ -942,13 +1214,14 @@ class WebBackend:
                    f"切換核心需重新啟動程式以套用。")
         else:
             msg = f"「{core_label} · {model_label}」已是目前使用的模型。"
-        if backend == "chatllm":          # AMD 內顯已知問題 → 一併提醒
-            msg += "\n" + _CHATLLM_AMD_NOTE
+        note = self._note_for(backend, model_label)
+        if note:                          # chatllm AMD 問題／TEA 域限制 → 一併提醒
+            msg += "\n" + note
         return {
             "ok": True, "core": core_label, "model": model_label,
             "backend": backend, "arch": arch, "restartRequired": restart,
             "canLoadNow": can_load_now,
-            "note": _CHATLLM_AMD_NOTE if backend == "chatllm" else "",
+            "note": note,
             "message": msg,
         }
 
@@ -987,7 +1260,9 @@ class WebBackend:
         from downloader import (quick_check, quick_check_1p7b, quick_check_aligner,
                                 quick_check_diarization, quick_check_crispasr,
                                 quick_check_breeze, quick_check_qwen3_asr_gguf,
-                                quick_check_qwen3_asr_ja_gguf, quick_check_aligner_gguf)
+                                quick_check_qwen3_asr_ja_gguf, quick_check_aligner_gguf,
+                                quick_check_tea_asr_gguf, crispasr_variants,
+                                _CRISPASR_VERSION)
         s = self._settings_raw()
         model_dir = self._model_dir()
         crispasr_dir = self._crispasr_dir()
@@ -1030,16 +1305,25 @@ class WebBackend:
             ],
         }
 
-        # CRISPASR（Vulkan）路徑：核心 exe + Breeze/Qwen 模型 + FA aligner gguf + 共用 diar
-        core_ok = quick_check_crispasr(crispasr_dir)
+        # CRISPASR 路徑：核心 exe + Breeze/Qwen/TEA 模型 + FA aligner gguf + 共用 diar
+        #   核心的「就緒」條件含版本與加速版本 → 舊版或選了別的加速版本都算未就緒，
+        #   會在載入時自動重抓（訊息裡標明目前選的是哪一個 build）。
+        variant = self._crisp_variant()
+        variants_meta = crispasr_variants()
+        vmeta = variants_meta.get(variant, variants_meta["vulkan"])
+        core_ok = quick_check_crispasr(crispasr_dir, variant)
         crisp_quant = s.get("crisp_quant", "q5")
         qwen_quant = s.get("crisp_qwen_quant", "q8")
         fa_quant = s.get("crisp_fa_quant", "q5")
         crisp = {
-            "label": "CRISPASR（Vulkan：Whisper/Breeze + Qwen）", "backend": "crispasr",
+            "label": (f"CRISPASR（{vmeta.get('short') or vmeta['label']}："
+                      f"Whisper/Breeze + Qwen + TEA）"),
+            "backend": "crispasr",
             "items": [
-                item("core", "CrispASR 核心（crispasr.exe）", core_ok,
-                     "已下載", "未下載（約 27MB，啟用時下載）"),
+                item("core", (f"CrispASR {_CRISPASR_VERSION} 核心"
+                              f"（{vmeta.get('short') or vmeta['label']}）"),
+                     core_ok, "已下載",
+                     f"未下載或版本不符（約 {vmeta['size_mb']}MB，啟用時下載）"),
                 item("breeze", f"Whisper/Breeze 模型（{crisp_quant.upper()}）",
                      quick_check_breeze(crispasr_dir, crisp_quant),
                      "已下載", "未下載（啟用時下載）"),
@@ -1049,6 +1333,9 @@ class WebBackend:
                 item("qwen_ja", f"Qwen3-ASR-1.7B 日語動漫模型（{qwen_quant.upper()}）",
                      quick_check_qwen3_asr_ja_gguf(model_dir, qwen_quant),
                      "已下載", "未下載（日語增強，啟用時下載）"),
+                item("tea", "TEA-ASR-1.1 台灣國語模型（Q8）",
+                     quick_check_tea_asr_gguf(model_dir, "q8"),
+                     "已下載", "未下載（繁中／台灣用語增強，啟用時下載）"),
                 item("fa", f"時間軸對齊 FA（aligner gguf {fa_quant.upper()}）",
                      quick_check_aligner_gguf(crispasr_dir, fa_quant),
                      "已下載", "未下載（約 643MB，啟用時下載）"),
@@ -1132,6 +1419,9 @@ class WebBackend:
             "uiLang": s.get("ui_lang", "繁體中文"),
             "vad": float(s.get("vad_threshold", 0.5)),
             "chunkSecs": int(s.get("chunk_secs", 0) or 0),   # 0=自動（依模型上限）
+            # 模型頁模式：basic（用途導向，預設）／advanced（核心+模型全手動）
+            "modelMode": (s.get("model_mode") if s.get("model_mode") in ("basic", "advanced")
+                          else "basic"),
         }
 
     def set_settings(self, patch: dict) -> dict:
@@ -1150,7 +1440,8 @@ class WebBackend:
             cur["vocab_convert"] = conv
         key_map = {"scale": "ui_scale", "format": "output_format",
                    "mirror": "hf_mirror", "ffmpeg": "ffmpeg_path", "theme": "appearance",
-                   "uiLang": "ui_lang", "vad": "vad_threshold", "chunkSecs": "chunk_secs"}
+                   "uiLang": "ui_lang", "vad": "vad_threshold", "chunkSecs": "chunk_secs",
+                   "modelMode": "model_mode"}
         for k, v in patch.items():
             if k in key_map:
                 cur[key_map[k]] = v

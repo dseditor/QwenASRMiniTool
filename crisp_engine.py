@@ -9,8 +9,12 @@ ASREngine[OpenVINO] / ChatLLMASREngine[chatllm] 並列），用來載入 Whisper
   • CrispASR 是 whisper.cpp fork，crispasr.exe 自己會輸出 SRT（含分段時間軸），
     因此本引擎不需重造 VAD/chunk/FA，本質是「呼叫 crispasr.exe → 讀 SRT →
     OpenCC 繁化 → 寫回」。
-  • GPU 走 Vulkan（--gpu-backend vulkan）。Vulkan 在 Windows 通吃 Intel/AMD
-    內顯與 NVIDIA 獨顯，是通用加速路徑，且避開 CUDA 在 Blackwell 的 FA crash。
+  • GPU 後端由 load(gpu_backend=) 決定，對應「使用者選的 CrispASR 加速版本」
+    （downloader.crispasr_gpu_backend）：
+      - vulkan（預設）：Windows 通吃 Intel/AMD 內顯與 NVIDIA 獨顯，體積最小。
+      - cuda：NVIDIA 專用，需下載 CUDA build（0.8.32 起在 Blackwell 實測正常；
+        早期 0.7.1 的 fattn crash 為 nemotron 後端專屬問題）。
+      - None：CPU build，改掛 -ng（該 build 沒有 ggml-vulkan/cuda DLL）。
   • 介面對齊 app.py 既有引擎契約：load / ready / transcribe / process_file /
     processor / diar_engine / use_aligner / aligner / _lock / rebuild_cc。
 
@@ -88,6 +92,9 @@ def _infer_backend(model_path: Path | str) -> str:
     name = Path(model_path).name.lower()
     if "qwen3" in name:
         return "qwen3-1.7b" if "1.7b" in name else "qwen3"
+    # TEA-ASR = Qwen3-ASR-1.7B 的台灣國語微調，架構相同故共用 qwen3-1.7b 後端
+    if "tea-asr" in name or "tea_asr" in name:
+        return "qwen3-1.7b"
     return "whisper"
 
 # app.py 傳入的 language（如 "Chinese" / "自動偵測"）→ whisper 語言代碼
@@ -198,10 +205,41 @@ def probe_crispasr_devices(crispasr_dir: str | Path) -> dict:
     return diag
 
 
+# ── 與 CTC 對齊器不相容的模型 ──────────────────────────────────────────
+#   `qwen3-forced-aligner-0.6b` 是「把 vocabulary head 換成 5000 類 timestamp
+#   head」的對齊器，其類別表是配著 Qwen3-ASR 的**簡體**輸出建立的。我們的管線
+#   一直沒事，是因為既有模型都吐簡體、OpenCC 繁化發生在對齊**之後** —— 對齊器
+#   永遠只看到簡體。
+#
+#   TEA-ASR 打破了這個隱含假設：它**原生輸出繁體**，`詢`／`會`／`灣` 這類字落在
+#   對齊器的類別表外，對齊器就輸出未映射的類別 ID，crispasr 直接把它渲染成私用
+#   區字元（實測 `U+E000 + class_id`）→ 字幕出現亂碼，時間軸也跟著對歪。
+#   故這類模型一律不掛 `-falign`，改用後端自帶的時間戳（較粗但正確）。
+_FA_INCOMPATIBLE = ("tea-asr", "tea_asr")
+
+
+def _fa_incompatible(model_path) -> bool:
+    name = Path(model_path).name.lower()
+    return any(k in name for k in _FA_INCOMPATIBLE)
+
+
 class CrispWhisperEngine:
     """CrispASR(whisper backend) 推理引擎。子程序模式呼叫 crispasr.exe。"""
 
+    # use_aligner 做成 property：對齊器與模型不相容時，**任何**呼叫端把它設成
+    # True 都會被擋下（webview_backend.transcribe 每次轉錄都會依 UI 勾選重設，
+    # 只在 load() 關掉是攔不住的）。
+    @property
+    def use_aligner(self) -> bool:
+        return self._use_aligner
+
+    @use_aligner.setter
+    def use_aligner(self, v: bool):
+        self._use_aligner = bool(v) and not getattr(self, "_fa_blocked", False)
+
     def __init__(self):
+        self._use_aligner = False
+        self._fa_blocked  = False
         self.ready       = False
         self._lock       = threading.Lock()
         # 介面相容旗標
@@ -220,14 +258,15 @@ class CrispWhisperEngine:
         self._exe        = None    # Path: crispasr.exe
         self._model_path = None    # Path: Breeze .bin / Qwen3-ASR .gguf
         self._backend    = "whisper"  # crispasr 後端：whisper / qwen3 / qwen3-1.7b …
-        self._device_id  = 0       # Vulkan device id
+        self._device_id  = 0       # GPU device id
+        self._gpu_backend = "vulkan"  # --gpu-backend；None＝純 CPU（掛 -ng）
         self.cc          = None    # OpenCC 轉換器
 
     # ══ 載入 ══════════════════════════════════════════════════════════
 
     def load(self, model_path: Path = None, crispasr_dir: Path = None,
              device_id: int = 0, cb=None, aligner_path: Path = None,
-             backend: str | None = None):
+             backend: str | None = None, gpu_backend: str | None = "vulkan"):
         """驗證 crispasr.exe 與模型存在即可（子程序模式無常駐載入）。
 
         aligner_path：qwen3 ForcedAligner GGUF；None 時自動在 crispasr_dir 內尋找。
@@ -236,6 +275,10 @@ class CrispWhisperEngine:
 
         backend：crispasr 後端名（whisper / qwen3 / qwen3-1.7b …）。None 時依
         模型檔名自動推斷（Breeze→whisper、qwen3*.gguf→qwen3-1.7b）。
+
+        gpu_backend：crispasr.exe 的 `--gpu-backend`（vulkan / cuda）。傳 None
+        代表這份核心是 CPU 版或使用者選了純 CPU 推理 → 改掛 `-ng`。呼叫端應
+        依「實際安裝的加速版本」給值（downloader.crispasr_gpu_backend）。
         """
         def _s(msg):
             if cb:
@@ -259,12 +302,19 @@ class CrispWhisperEngine:
             )
         self._model_path = model_path
         self._device_id  = int(device_id)
+        self._gpu_backend = gpu_backend or None
         # 後端：顯式指定優先，否則依模型檔名自動推斷
         self._backend    = backend or _infer_backend(model_path)
 
         # ── 偵測 FA 對齊器 GGUF（有則預設啟用）──────────────────────────
+        #   先判斷這顆模型能不能用對齊器（見 _FA_INCOMPATIBLE 的說明）；不能用
+        #   就整條 FA 關掉，避免對齊器吐出私用區亂碼並把時間軸對歪。
+        self._fa_blocked = _fa_incompatible(model_path)
+        if self._fa_blocked:
+            _s("此模型原生輸出繁體，與 CTC 對齊器不相容 → 停用字級對齊，"
+               "改用後端自帶時間軸")
         ap = Path(aligner_path) if aligner_path else _find_aligner_gguf(crispasr_dir)
-        if ap and ap.exists():
+        if ap and ap.exists() and not self._fa_blocked:
             self._aligner_path = ap
             self._fa_bin   = ap          # 真值＝FA 就緒
             self.use_aligner = True      # 預設開（缺檔則維持 False，退回 native）
@@ -327,9 +377,14 @@ class CrispWhisperEngine:
         # 非 whisper 架構（Qwen3-ASR 等）需顯式指定後端，crispasr 才用對解碼路徑
         if self._backend and self._backend != "whisper":
             cmd += ["--backend", self._backend]
+        # 加速版本：Vulkan／CUDA 走 --gpu-backend + 裝置 id；CPU 版掛 -ng
+        # （CPU 版核心沒有 ggml-vulkan/cuda DLL，硬給 --gpu-backend 會啟動失敗）
+        if self._gpu_backend:
+            cmd += ["--gpu-backend", self._gpu_backend,
+                    "-dev", str(self._device_id)]
+        else:
+            cmd += ["-ng"]
         cmd += [
-            "--gpu-backend", "vulkan",
-            "-dev", str(self._device_id),
             "-of", str(out_base),         # 輸出檔名（不含副檔名）
             "-np",                        # 不印多餘訊息
         ]
@@ -429,6 +484,13 @@ class CrispWhisperEngine:
         ts_items, raw_text = _parse_srt_words(raw, drop_punct=is_qwen)
         if not ts_items:
             return None
+        if getattr(self, "_fa_blocked", False):
+            # 沒有對齊器時 `-ml 1` 對 qwen3 後端無效，每個 item 會是一整段長文字，
+            # 共用分行器便無從斷句（實測整段可達 60 秒）。這裡把長 item 依字元
+            # **等時內插**攤成字元級，讓分行器照常做標點切行／MAX_CHARS 保護。
+            # 內插時間軸當然不如 CTC 對齊精準，但在「粗到不能看」與「約略正確」
+            # 之間，後者對字幕明顯有用；且段落起訖仍是後端給的真實時間。
+            ts_items = _interpolate_chars(ts_items)
 
         # 日語：跳過 OpenCC 繁化。s2twp/s2t 是「簡體中文→繁體中文」轉換，套在日文上
         # 會把日文漢字（会/静/図/学）誤轉成繁中字形（會/靜/圖/學），對日語讀者是錯的
@@ -443,6 +505,8 @@ class CrispWhisperEngine:
         )
         if not lines5:
             return None
+        if getattr(self, "_fa_blocked", False):
+            lines5 = _fix_leading_punct(lines5)
         lines = [(s, e, t, sp) for (s, e, t, sp, _w) in lines5]
 
         # 說話者分離（外部 ONNX，與 whisper/qwen 後端無關）：依時間中點指派每行說話者。
@@ -520,6 +584,45 @@ def _srt_ts_to_sec(ts: str) -> float:
     hms, _, ms = ts.partition(",")
     h, m, s = hms.split(":")
     return int(h) * 3600 + int(m) * 60 + int(s) + (int(ms) / 1000.0 if ms else 0.0)
+
+
+def _fix_leading_punct(lines5: list[tuple]) -> list[tuple]:
+    """把「以標點開頭」的字幕行，其開頭標點移回前一行行尾。
+
+    只發生在無對齊器的內插路徑：crispasr 的每個 SRT 區塊各自結束，區塊邊界剛好
+    落在標點前時，該標點就成了下一行的開頭（「，直詢臺上」）。標點屬於前一句，
+    移回去即可。首行的開頭標點沒有前一行可歸，直接去掉。
+    """
+    out: list[tuple] = []
+    for (s, e, t, spk, w) in lines5:
+        lead = ""
+        while t and t[0] in _PUNCT:
+            lead, t = lead + t[0], t[1:]
+        if lead and out:
+            ps, pe, pt, pspk, pw = out[-1]
+            out[-1] = (ps, pe, pt + lead, pspk, pw)
+        if t:
+            out.append((s, e, t, spk, w))
+    return out
+
+
+def _interpolate_chars(items: list[tuple[str, float, float]]
+                       ) -> list[tuple[str, float, float]]:
+    """把「一段長文字 + 起訖時間」攤成字元級（等時內插）。
+
+    只處理長度 > 1 的 item；已是單字元的原樣保留，故對本來就有字級時間軸的
+    路徑（掛了 FA）呼叫也不會有副作用。
+    """
+    out: list[tuple[str, float, float]] = []
+    for text, s, e in items:
+        n = len(text)
+        if n <= 1:
+            out.append((text, s, e))
+            continue
+        step = (e - s) / n if e > s else 0.0
+        for i, ch in enumerate(text):
+            out.append((ch, s + step * i, s + step * (i + 1)))
+    return out
 
 
 def _parse_srt_words(srt_text: str, drop_punct: bool = False

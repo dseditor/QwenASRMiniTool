@@ -75,6 +75,9 @@
 
     "model.health": ["系統自檢", "系统自检", "System check"],
     "model.recheck": ["重新檢查", "重新检查", "Re-check"],
+    "model.pick": ["選擇模型", "选择模型", "Choose a model"],
+    "model.modeBasic": ["基礎", "基础", "Basic"],
+    "model.modeAdv": ["進階", "进阶", "Advanced"],
     "model.core": ["推理核心", "推理核心", "Inference core"],
     "model.model": ["模型", "模型", "Model"],
     "model.load": ["下載並載入模型", "下载并载入模型", "Download & load model"],
@@ -86,6 +89,7 @@
     "status.ready": ["模型已就緒", "模型已就绪", "Model ready"],
     "status.loading": ["載入模型中…", "载入模型中…", "Loading model…"],
     "status.needModel": ["尚未載入模型", "尚未载入模型", "No model loaded"],
+    "model.accel": ["推理加速版本", "推理加速版本", "Acceleration build"],
     "model.diag": ["診斷", "诊断", "Diagnostics"],
 
     "set.scale": ["介面縮放", "界面缩放", "UI scale"],

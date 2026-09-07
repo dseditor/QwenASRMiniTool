@@ -168,8 +168,12 @@ class WebViewServer:
                     return self._json(server.backend.get_settings())
                 if path == "/api/devices":
                     return self._json(server.backend.list_devices())
+                if path == "/api/accel":          # 硬體偵測 + CrispASR 加速版本清單
+                    return self._json(server.backend.get_accel())
                 if path == "/api/model-options":
                     return self._json(server.backend.get_model_options())
+                if path == "/api/basic-profiles":   # 基礎模式：用途 → 建議模型
+                    return self._json(server.backend.get_basic_profiles())
                 if path == "/api/languages":
                     return self._json(server.backend.get_languages())
                 if path == "/api/endpoint":
@@ -203,6 +207,9 @@ class WebViewServer:
                         body = self._read_json_body()
                         return self._json(server.backend.set_model(
                             body.get("core"), body.get("model")))
+                    if path == "/api/accel":         # 選定加速版本（下次載入時下載）
+                        return self._json(server.backend.set_accel(
+                            self._read_json_body().get("variant")))
                     if path == "/api/load":           # 首次選定模型 → 就地下載並載入
                         return self._json(server.backend.request_load())
                     if path == "/api/endpoint":

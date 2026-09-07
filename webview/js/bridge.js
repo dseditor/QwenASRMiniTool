@@ -120,6 +120,17 @@
       if (MODE === "web") return apiGet("/api/devices");
       return MOCK.devices;
     },
+    // CrispASR 推理加速版本（Vulkan / CUDA / CPU）：偵測硬體 → 給推薦 + 選單
+    async getAccel() {
+      if (MODE === "web") return apiGet("/api/accel");
+      return MOCK.accel;
+    },
+    async setAccel(variant) {
+      if (MODE === "web") return apiPost("/api/accel", { variant });
+      MOCK.accel.selected = variant;
+      return { ok: true, variant, restartRequired: true,
+               message: "（展示模式）已記住加速版本，重新啟動後套用" };
+    },
     async setBackend(id) {
       if (MODE === "web") return apiPost("/api/backend", { index: id });
       return true;
@@ -127,6 +138,11 @@
     async getModelOptions() {
       if (MODE === "web") return apiGet("/api/model-options");
       return MOCK.modelOptions;
+    },
+    // 基礎模式：用途清單（後端已套用硬體建議）
+    async getBasicProfiles() {
+      if (MODE === "web") return apiGet("/api/basic-profiles");
+      return MOCK.basicProfiles;
     },
     async setModel(core, model) {
       if (MODE === "web") return apiPost("/api/model", { core, model });
@@ -229,6 +245,44 @@
     settings: { scale: 100, format: "srt", vocab: "s2twp", mirror: "", ffmpeg: "", theme: "light", uiLang: "繁體中文", vad: 0.5, chunkSecs: 0 },
     endpoint: { running: true, host: "192.168.1.20", port: 11435, key: "k_8x2pf3qd7m1c", url: "" },
     tunnel: { running: false, url: "", status: "" },
+    basicProfiles: {
+      tier: "gpu", accel: "Vulkan",
+      hardware: "（展示模式）偵測到獨立顯示卡：NVIDIA GeForce RTX 4070 —— 可用最準的模型。",
+      current: { core: "Qwen", model: "Qwen3-ASR-1.7B Q8 (CRISPASR)" },
+      profiles: [
+        { key: "zh", title: "中文（標準）", desc: "一般用途首選：中文為主、斷句與標點最完整。",
+          note: "", core: "Qwen", model: "Qwen3-ASR-1.7B Q8 (CRISPASR)",
+          arch: "GPU · CRISPASR（Vulkan）", present: true, selected: true },
+        { key: "tea", title: "繁體中文 TEA（乾淨聲音）", desc: "台灣國語特化，原生輸出繁體。",
+          note: "⚠️ 背景配樂較重的段落或歌曲可能整段無輸出。", core: "Qwen",
+          model: "TEA-ASR-1.1 台灣國語 Q8 (CRISPASR)", arch: "GPU · CRISPASR（Vulkan）",
+          present: false, selected: false },
+        { key: "ja", title: "日本語", desc: "日語／動漫特化，保留日文原生漢字。", note: "",
+          core: "Qwen", model: "Qwen3-ASR-1.7B 日語動漫 Q8 (CRISPASR)",
+          arch: "GPU · CRISPASR（Vulkan）", present: false, selected: false },
+        { key: "twmix", title: "國台語混合（高速）", desc: "Whisper Breeze，速度極快、不輸出標點。",
+          note: "", core: "Whisper (Breeze)", model: "Breeze Q8 (精確)",
+          arch: "GPU · CRISPASR（Vulkan）", present: false, selected: false },
+      ],
+    },
+    accel: {
+      ok: true, selected: "vulkan", recommended: "vulkan",
+      reason: "（展示模式）偵測到 NVIDIA 顯示卡。預設仍用 Vulkan（僅 34 MB、實測速度接近）。",
+      latest: "0.8.32", installed: { version: "0.8.32", variant: "vulkan" }, needsDownload: false,
+      hardware: { gpus: [{ vendor: "nvidia", name: "NVIDIA GeForce RTX 4070", vram_mb: 8192 }] },
+      options: [
+        { key: "vulkan", label: "Vulkan（通用 GPU）", size_mb: 34, recommended: true, suitable: true, note: "",
+          desc: "NVIDIA / AMD / Intel 通吃，體積最小。" },
+        { key: "cuda13", label: "CUDA 13（NVIDIA 新驅動）", size_mb: 484, recommended: false, suitable: true, note: "",
+          desc: "NVIDIA 專用，自帶 CUDA 13 runtime。" },
+        { key: "cuda12", label: "CUDA 12（NVIDIA 專用）", size_mb: 690, recommended: false, suitable: true,
+          note: "驅動版本建議改用另一個 CUDA 版本", desc: "NVIDIA 專用，自帶 CUDA 12 runtime。" },
+        { key: "cpu", label: "CPU（純處理器）", size_mb: 8, recommended: false, suitable: true, note: "",
+          desc: "完全不碰顯卡。" },
+        { key: "cpu-legacy", label: "CPU 相容版（無 AVX2 的老 CPU）", size_mb: 8, recommended: false,
+          suitable: true, note: "只有在一般 CPU 版閃退時才需要", desc: "給不支援 AVX2 的老處理器。" },
+      ],
+    },
     devices: {
       devices: [
         { kind: "cpu", name: "AMD Ryzen 5 9600X 6-Core", note: "使用中" },

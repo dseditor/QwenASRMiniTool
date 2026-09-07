@@ -315,10 +315,256 @@ def download_1p7b(model_dir: Path, progress_cb=None):
 # CrispASR(Whisper) 核心 + Breeze-ASR-26 GGML 模型（按需下載，不進 EXE）
 # ══════════════════════════════════════════════════════════════════════
 
-# 已測試完成的 CrispASR Windows Vulkan 版（v0.8.8，2026-07 實機驗證：版本/GPU
-# 偵測/日語 qwen3 後端皆正常，--diagnostics 輸出格式與 probe_crispasr_devices 相容）
-_CRISPASR_ZIP_URL = ("https://github.com/CrispStrobe/CrispASR/releases/"
-                     "download/v0.8.8/crispasr-windows-x86_64-vulkan.zip")
+# ── CrispASR 核心：多加速版本（Vulkan / CUDA / CPU）─────────────────────
+# v0.8.32（2026-09-04 release）。GitHub 來源不套用 HF 鏡像。
+#
+# Windows 官方只出 Vulkan / CUDA / CPU 三條路——**沒有** HIP(ROCm) 也沒有 SYCL，
+# 所以 AMD 與 Intel 顯卡的最佳解就是 Vulkan；只有 NVIDIA 才多一條 CUDA 可選。
+# CUDA 包含 runtime DLL（cudart/cublas/cublasLt）故體積極大，是否值得換那點速度
+# 由使用者自己在「推理加速版本」決定，我們只負責推薦。
+_CRISPASR_VERSION  = "0.8.32"
+_CRISPASR_REL_BASE = ("https://github.com/CrispStrobe/CrispASR/releases/"
+                      f"download/v{_CRISPASR_VERSION}")
+
+# variant → 中繼資料。gpu_backend 直接餵給 crispasr.exe 的 `--gpu-backend`
+# （None＝不給 GPU 後端、改掛 `-ng` 純 CPU 推理）。
+_CRISPASR_VARIANTS: dict[str, dict] = {
+    "vulkan": {
+        "zip":         "crispasr-windows-x86_64-vulkan.zip",
+        "label":       "Vulkan（通用 GPU）",
+        "short":       "Vulkan",
+        "size_mb":     34,
+        "gpu_backend": "vulkan",
+        "desc":        "NVIDIA / AMD / Intel 通吃，體積最小。已長期實測穩定，"
+                       "無獨立顯卡時亦可走內顯。",
+    },
+    "cuda12": {
+        "zip":         "crispasr-windows-x86_64-cuda.zip",
+        "label":       "CUDA 12（NVIDIA 專用）",
+        "short":       "CUDA 12",
+        "size_mb":     690,
+        "gpu_backend": "cuda",
+        "desc":        "NVIDIA 專用，自帶 CUDA 12 runtime。大型語音 LLM 後端"
+                       "（Qwen3-ASR）通常比 Vulkan 快，但下載量大得多。",
+    },
+    "cuda13": {
+        "zip":         "crispasr-windows-x86_64-cuda13.zip",
+        "label":       "CUDA 13（NVIDIA 新驅動）",
+        "short":       "CUDA 13",
+        "size_mb":     484,
+        "gpu_backend": "cuda",
+        "desc":        "同 CUDA 12 但用較新的 runtime，體積小一些；需要 580 以上"
+                       "的 NVIDIA 驅動。",
+    },
+    "cpu": {
+        "zip":         "crispasr-windows-x86_64-cpu.zip",
+        "label":       "CPU（純處理器）",
+        "short":       "CPU",
+        "size_mb":     8,
+        "gpu_backend": None,
+        "desc":        "完全不碰顯卡。速度最慢，但在顯卡驅動有問題時最不會出事。",
+    },
+    "cpu-legacy": {
+        "zip":         "crispasr-windows-x86_64-cpu-legacy.zip",
+        "label":       "CPU 相容版（無 AVX2 的老 CPU）",
+        "short":       "CPU 相容版",
+        "size_mb":     8,
+        "gpu_backend": None,
+        "desc":        "給 2013 年前、不支援 AVX2 的老處理器；一般 CPU 版開不起來"
+                       "（閃退／非法指令）時才選這個。",
+    },
+}
+_CRISPASR_DEFAULT_VARIANT = "vulkan"
+
+# 安裝紀錄：記下這份 crispasr/ 目錄「實際裝了哪個版本／哪個加速版本」，
+# 用來判斷是否需要重新下載（升版或使用者換加速版本）。
+_CRISPASR_MARKER = "crispasr_build.json"
+
+
+def crispasr_variants() -> dict[str, dict]:
+    """回傳可選的加速版本表（唯讀副本，供 UI 列選單）。"""
+    return {k: dict(v) for k, v in _CRISPASR_VARIANTS.items()}
+
+
+def crispasr_gpu_backend(variant: str | None) -> str | None:
+    """variant → crispasr.exe 的 `--gpu-backend` 值（None＝純 CPU）。"""
+    v = _CRISPASR_VARIANTS.get(variant or _CRISPASR_DEFAULT_VARIANT)
+    return (v or _CRISPASR_VARIANTS[_CRISPASR_DEFAULT_VARIANT])["gpu_backend"]
+
+
+# ── 硬體偵測（零依賴，且必須在下載 crispasr 之前就能跑）─────────────────
+#   注意：既有的 probe_crispasr_devices() 是跑 `crispasr.exe --diagnostics`
+#   得到的，但我們得在「還沒下載核心」時就決定要抓哪個 zip → 先有雞先有蛋。
+#   故這裡改走 OS 自帶的管道：Win32_VideoController(CIM) 認廠商、nvidia-smi
+#   認驅動版本。兩者都不需要預先安裝任何東西。
+_CREATE_NO_WINDOW = 0x08000000 if _sys.platform == "win32" else 0
+
+
+def _run_hidden(cmd: list[str], timeout: int = 12) -> str:
+    """執行外部指令並取回 stdout（隱藏主控台視窗）；失敗回空字串。"""
+    import subprocess
+    si = None
+    if _sys.platform == "win32":
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    try:
+        r = subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL,
+                           text=True, encoding="utf-8", errors="replace",
+                           timeout=timeout, creationflags=_CREATE_NO_WINDOW,
+                           startupinfo=si)
+        return r.stdout or ""
+    except Exception:
+        return ""
+
+
+def _vendor_of(name: str, compat: str) -> str:
+    """由顯卡名稱／廠商字串判斷 vendor 代號。"""
+    s = f"{compat} {name}".lower()
+    if "nvidia" in s:
+        return "nvidia"
+    if "amd" in s or "advanced micro" in s or "ati " in s or "radeon" in s:
+        return "amd"
+    if "intel" in s:
+        return "intel"
+    if "microsoft basic" in s or "remote" in s:
+        return "virtual"          # 遠端桌面／基本顯示卡，不算真 GPU
+    return "other"
+
+
+def detect_hardware() -> dict:
+    """偵測顯卡與 NVIDIA 驅動版本（Windows）。
+
+    回傳：
+      {"gpus": [{"vendor","name","vram_mb","driver"}...],   # 已排除虛擬顯示卡
+       "vendors": ["nvidia","intel"],                        # 去重後的廠商清單
+       "nvidia_driver": 581.15 | None,                       # 主版號.次版號
+       "has_discrete": bool,
+       "error": str | None}
+    """
+    info = {"gpus": [], "vendors": [], "nvidia_driver": None,
+            "has_discrete": False, "error": None}
+    if _sys.platform != "win32":
+        info["error"] = "目前僅支援 Windows 的硬體偵測"
+        return info
+
+    # ① 顯示卡清單（CIM/WMI）。AdapterRAM 對 4GB 以上的卡會溢位，僅供參考。
+    ps = ("Get-CimInstance Win32_VideoController | "
+          "Select-Object Name,AdapterCompatibility,DriverVersion,AdapterRAM | "
+          "ConvertTo-Json -Compress")
+    out = _run_hidden(["powershell", "-NoProfile", "-NonInteractive",
+                       "-Command", ps])
+    try:
+        import json as _json
+        data = _json.loads(out) if out.strip() else []
+        if isinstance(data, dict):
+            data = [data]
+        for d in data:
+            name   = (d.get("Name") or "").strip()
+            compat = (d.get("AdapterCompatibility") or "").strip()
+            vendor = _vendor_of(name, compat)
+            if vendor == "virtual" or not name:
+                continue
+            ram = d.get("AdapterRAM") or 0
+            info["gpus"].append({
+                "vendor": vendor, "name": name,
+                "vram_mb": int(ram) // (1024 * 1024) if ram and ram > 0 else 0,
+                "driver": (d.get("DriverVersion") or "").strip(),
+            })
+    except Exception as e:
+        info["error"] = f"顯示卡列舉失敗：{e}"
+
+    info["vendors"] = sorted({g["vendor"] for g in info["gpus"]})
+    # Intel/AMD 的內顯也會出現在清單裡；「有獨立顯卡」以 NVIDIA 或 AMD 獨顯字樣判斷
+    info["has_discrete"] = any(
+        g["vendor"] == "nvidia" or
+        (g["vendor"] == "amd" and "radeon" in g["name"].lower()
+         and "graphics" not in g["name"].lower())
+        for g in info["gpus"])
+
+    # ② NVIDIA 驅動版本（決定 CUDA 12 還是 13）
+    if "nvidia" in info["vendors"]:
+        smi = _run_hidden(["nvidia-smi",
+                           "--query-gpu=driver_version",
+                           "--format=csv,noheader"])
+        for line in smi.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                parts = line.split(".")
+                info["nvidia_driver"] = float(f"{parts[0]}.{parts[1]}"
+                                              if len(parts) > 1 else parts[0])
+            except Exception:
+                pass
+            break
+    return info
+
+
+# CUDA 13 在 Windows 需要 580 以上的 NVIDIA 驅動；再舊就只能走 CUDA 12。
+_CUDA13_MIN_DRIVER = 580.0
+
+
+def recommend_crispasr_variant(hw: dict | None = None) -> dict:
+    """依硬體推薦加速版本，並回傳整份可選清單（供 UI 直接渲染）。
+
+    回傳 {"recommended": "vulkan", "reason": "…", "hardware": {...},
+          "options": [{"key","label","size_mb","desc","recommended":bool,
+                       "suitable":bool,"note":str}, …]}
+
+    推薦政策（刻意保守，理由寫在 reason 裡讓使用者自己判斷是否改選）：
+      • 沒有 NVIDIA → 一律 Vulkan（Windows 沒有 ROCm/SYCL 版，Vulkan 就是最佳解）
+      • 有 NVIDIA   → 仍推薦 Vulkan 當預設（33MB vs 484MB+ 的下載量差距懸殊，
+                      且實測 Whisper 後端兩者速度接近），但把對應驅動版本的
+                      CUDA 標成「可選加速」讓使用者自行升級。
+    """
+    hw = hw or detect_hardware()
+    vendors = hw.get("vendors", [])
+    drv     = hw.get("nvidia_driver")
+    has_nv  = "nvidia" in vendors
+
+    # NVIDIA 使用者可選的 CUDA 版本：驅動夠新才給 13，否則 12。
+    cuda_key = None
+    if has_nv:
+        cuda_key = "cuda13" if (drv is None or drv >= _CUDA13_MIN_DRIVER) else "cuda12"
+
+    recommended = _CRISPASR_DEFAULT_VARIANT       # 一律以 Vulkan 為預設
+    if not hw.get("gpus"):
+        reason = ("未偵測到顯示卡資訊，先以 Vulkan 版為預設——它在沒有獨立顯卡時"
+                  "會自動退回 CPU 推理，最不會出事。")
+    elif has_nv:
+        names = "、".join(g["name"] for g in hw["gpus"] if g["vendor"] == "nvidia")
+        reason = (f"偵測到 NVIDIA 顯示卡（{names}）。預設仍用 Vulkan（僅 34 MB、"
+                  f"實測速度接近）；若要壓榨 Qwen3-ASR 的極速，可改選 "
+                  f"{_CRISPASR_VARIANTS[cuda_key]['label']}。")
+    elif "amd" in vendors or "intel" in vendors:
+        names = "、".join(g["name"] for g in hw["gpus"]
+                          if g["vendor"] in ("amd", "intel"))
+        reason = (f"偵測到 {'AMD' if 'amd' in vendors else 'Intel'} 顯示卡"
+                  f"（{names}）。CrispASR 的 Windows 版沒有 ROCm／SYCL，"
+                  f"Vulkan 就是這張卡的最佳解。")
+    else:
+        reason = "未偵測到可加速的顯示卡，使用 Vulkan 版（會自動退回 CPU 推理）。"
+
+    options = []
+    for key, meta in _CRISPASR_VARIANTS.items():
+        suitable, note = True, ""
+        if key in ("cuda12", "cuda13"):
+            if not has_nv:
+                suitable, note = False, "需要 NVIDIA 顯示卡"
+            elif key == "cuda13" and drv is not None and drv < _CUDA13_MIN_DRIVER:
+                suitable, note = False, (f"需要 {_CUDA13_MIN_DRIVER:.0f} 以上的驅動"
+                                         f"（目前 {drv:.2f}）")
+            elif key != cuda_key:
+                note = "驅動版本建議改用另一個 CUDA 版本"
+        elif key == "cpu-legacy":
+            note = "只有在一般 CPU 版閃退時才需要"
+        options.append({"key": key, "label": meta["label"],
+                        "size_mb": meta["size_mb"], "desc": meta["desc"],
+                        "recommended": key == recommended,
+                        "suitable": suitable, "note": note})
+
+    return {"recommended": recommended, "reason": reason,
+            "hardware": hw, "options": options}
 
 # Breeze-ASR-26 GGML（phate334）三種量化
 _BREEZE_REPO  = "phate334/Breeze-ASR-26-GGML"
@@ -335,25 +581,71 @@ def breeze_filename(quant: str) -> str:
     return _BREEZE_FILES.get(quant, _BREEZE_FILES["q5"])
 
 
-def quick_check_crispasr(crispasr_dir: Path) -> bool:
-    """CrispASR 核心是否就緒（crispasr.exe 存在，含一層子資料夾）。"""
-    if (crispasr_dir / "crispasr.exe").exists():
-        return True
-    return any(crispasr_dir.glob("**/crispasr.exe"))
+def installed_crispasr_info(crispasr_dir: Path) -> dict:
+    """讀取 crispasr/ 的安裝紀錄；沒有紀錄檔時回傳 version=None。
+
+    0.8.8 以前的舊安裝沒有紀錄檔 → 回 {"version": None, "variant": None}，
+    呼叫端據此判定「需要升級」。
+    """
+    import json as _json
+    f = Path(crispasr_dir) / _CRISPASR_MARKER
+    try:
+        d = _json.loads(f.read_text(encoding="utf-8"))
+        return {"version": d.get("version"), "variant": d.get("variant")}
+    except Exception:
+        return {"version": None, "variant": None}
 
 
-def download_crispasr_core(crispasr_dir: Path, progress_cb=None):
-    """下載 CrispASR Vulkan zip 並解壓（扁平化）至 crispasr_dir。
+def _write_crispasr_marker(crispasr_dir: Path, variant: str):
+    import json as _json
+    try:
+        (Path(crispasr_dir) / _CRISPASR_MARKER).write_text(
+            _json.dumps({"version": _CRISPASR_VERSION, "variant": variant},
+                        ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def quick_check_crispasr(crispasr_dir: Path, variant: str | None = None) -> bool:
+    """CrispASR 核心是否就緒。
+
+    variant 為 None（舊呼叫端）：只看 crispasr.exe 在不在，維持原行為。
+    variant 有值：另外要求安裝紀錄的版本與加速版本都吻合——版本升級或使用者
+    改選加速版本時就會回 False，觸發重新下載。
+    """
+    crispasr_dir = Path(crispasr_dir)
+    exists = ((crispasr_dir / "crispasr.exe").exists()
+              or any(crispasr_dir.glob("**/crispasr.exe")))
+    if not exists or variant is None:
+        return exists
+    info = installed_crispasr_info(crispasr_dir)
+    return info["version"] == _CRISPASR_VERSION and info["variant"] == variant
+
+
+def download_crispasr_core(crispasr_dir: Path, progress_cb=None,
+                           variant: str | None = None):
+    """下載指定加速版本的 CrispASR zip 並解壓（扁平化）至 crispasr_dir。
 
     progress_cb(pct: float, msg: str)。GitHub 來源不套用 HF 鏡像。
+    variant 省略時用預設的 Vulkan 版（維持舊呼叫端行為）。
+
+    換版本／升版時會**先清掉舊的 .exe/.dll**：不同加速版本（例如 Vulkan 版的
+    ggml-vulkan.dll）與不同 CrispASR 版本的 DLL 混在同一個資料夾會載到不相容
+    的 ggml，症狀是啟動即閃退。模型檔（.bin/.gguf）不動，換版本不必重抓模型。
     """
     import shutil
     import tempfile
     import zipfile
 
+    variant = variant if variant in _CRISPASR_VARIANTS else _CRISPASR_DEFAULT_VARIANT
+    meta    = _CRISPASR_VARIANTS[variant]
+    url     = f"{_CRISPASR_REL_BASE}/{meta['zip']}"
+
+    crispasr_dir = Path(crispasr_dir)
     crispasr_dir.mkdir(parents=True, exist_ok=True)
     if progress_cb:
-        progress_cb(0.0, "下載 CrispASR 核心（Vulkan）…")
+        progress_cb(0.0, f"下載 CrispASR 核心（{meta['label']}，"
+                         f"約 {meta['size_mb']} MB）…")
 
     def _cb(done: int, total_b: int):
         if progress_cb and total_b > 0:
@@ -363,12 +655,22 @@ def download_crispasr_core(crispasr_dir: Path, progress_cb=None):
             )
 
     with tempfile.TemporaryDirectory() as td:
-        zpath = Path(td) / "crispasr-vulkan.zip"
-        _download_file(_CRISPASR_ZIP_URL, zpath, progress_cb=_cb)
+        zpath = Path(td) / meta["zip"]
+        _download_file(url, zpath, progress_cb=_cb)
         if progress_cb:
             progress_cb(0.92, "解壓 CrispASR 核心…")
         with zipfile.ZipFile(zpath) as z:
             z.extractall(td)
+
+        # 舊的執行檔／DLL 全清（模型檔保留）
+        try:
+            (crispasr_dir / _CRISPASR_MARKER).unlink(missing_ok=True)
+            for old in crispasr_dir.iterdir():
+                if old.is_file() and old.suffix.lower() in (".exe", ".dll"):
+                    old.unlink(missing_ok=True)
+        except Exception:
+            pass                      # 檔案被佔用時就讓 copy 覆蓋，不中斷流程
+
         # 扁平化：所有 .exe / .dll 移到 crispasr_dir 根目錄
         for f in Path(td).glob("**/*"):
             if f.is_file() and f.suffix.lower() in (".exe", ".dll"):
@@ -376,8 +678,9 @@ def download_crispasr_core(crispasr_dir: Path, progress_cb=None):
 
     if not quick_check_crispasr(crispasr_dir):
         raise RuntimeError("CrispASR 核心解壓後仍找不到 crispasr.exe")
+    _write_crispasr_marker(crispasr_dir, variant)
     if progress_cb:
-        progress_cb(1.0, "CrispASR 核心就緒")
+        progress_cb(1.0, f"CrispASR {_CRISPASR_VERSION}（{meta['label']}）就緒")
 
 
 # ── ffmpeg（按需下載，不隨安裝包附帶）──────────────────────────────────
@@ -459,6 +762,62 @@ def download_breeze(crispasr_dir: Path, quant: str, progress_cb=None):
             )
 
     _download_file(f"{_BREEZE_BASE}/{fname}", dest, progress_cb=_cb)
+    if progress_cb:
+        progress_cb(1.0, f"✅ {fname}")
+
+
+# ── TEA-ASR-1.1 GGUF（台灣國語／繁體中文／中英夾雜特化）──────────────
+# JacobLinCool/TEA-ASR-1.1 是 Qwen/Qwen3-ASR-1.7B 的台灣國語微調，架構與
+# qwen3-1.7b 完全相同 → 一樣走 crispasr `--backend qwen3-1.7b`。
+#
+# ★ 注意：HuggingFace 上的 mradermacher/TEA-ASR-1.1-GGUF **不能**用於 CrispASR。
+#   那是 llama.cpp 的 mtmd 拆檔慣例（general.architecture=qwen3vl 的文字模型 +
+#   獨立的 clip/mmproj 音訊塔），而 CrispASR 的 qwen3 後端讀的是單檔融合式
+#   `qwen3asr`（audio.* 與 blk.* 同在一顆檔案），且沒有載入外掛 mmproj 的參數。
+#   下面這顆是我們用 CrispASR 官方的 models/convert-qwen3-asr-to-gguf.py 從原始
+#   safetensors 重轉、再以 crispasr-quantize 壓成 q8_0 的融合式 GGUF。
+_TEA_ASR_GGUF_REPO  = "dseditor/TEA-ASR-1.1-CrispASR-GGUF"
+_TEA_ASR_GGUF_BASE  = f"https://huggingface.co/{_TEA_ASR_GGUF_REPO}/resolve/main"
+_TEA_ASR_GGUF_FILES = {
+    "q8": "tea-asr-1.1-q8_0.gguf",     # 精確 ~2.03 GB
+}
+_TEA_ASR_GGUF_DEFAULT = "q8"
+
+
+def tea_asr_gguf_filename(quant: str = _TEA_ASR_GGUF_DEFAULT) -> str:
+    """量化代碼 → TEA-ASR-1.1 GGUF 檔名（目前只提供 q8）。"""
+    return _TEA_ASR_GGUF_FILES.get(quant, _TEA_ASR_GGUF_FILES[_TEA_ASR_GGUF_DEFAULT])
+
+
+def quick_check_tea_asr_gguf(model_dir: Path,
+                             quant: str = _TEA_ASR_GGUF_DEFAULT) -> bool:
+    """TEA-ASR-1.1 GGUF 是否存在（排除 LFS pointer）。"""
+    return _file_is_real(Path(model_dir) / tea_asr_gguf_filename(quant))
+
+
+def download_tea_asr_gguf(model_dir: Path,
+                          quant: str = _TEA_ASR_GGUF_DEFAULT, progress_cb=None):
+    """下載 TEA-ASR-1.1 GGUF 至 model_dir（通常為 ov_models/）。
+
+    progress_cb(pct: float, msg: str)。支援斷點續傳與 HF 鏡像。
+    """
+    model_dir = Path(model_dir)
+    model_dir.mkdir(parents=True, exist_ok=True)
+    fname = tea_asr_gguf_filename(quant)
+    dest  = model_dir / fname
+    if _file_is_real(dest):
+        if progress_cb:
+            progress_cb(1.0, f"{fname} 已存在")
+        return
+
+    def _cb(done: int, total_b: int):
+        if progress_cb and total_b > 0:
+            progress_cb(
+                done / total_b,
+                f"下載 {fname}…  {done/1_048_576:.0f} / {total_b/1_048_576:.0f} MB",
+            )
+
+    _download_file(f"{_TEA_ASR_GGUF_BASE}/{fname}", dest, progress_cb=_cb)
     if progress_cb:
         progress_cb(1.0, f"✅ {fname}")
 

@@ -663,6 +663,8 @@
         <span class="vram">${escapeHtml(dev.note || "")}</span>`;
       host.appendChild(el);
     });
+    await renderAccel();
+    await renderBasic();
     const diag = $("#gpu-diag");
     if (d.diag && d.diag.text) {
       diag.hidden = false;
@@ -707,6 +709,127 @@
     const note = o && o.dataset.note, el = $("#model-note");   // chatllm AMD 等提醒
     if (note) { el.hidden = false; el.textContent = note; } else { el.hidden = true; el.textContent = ""; }
   }
+
+  // ── 模型頁模式：基礎（用途導向）／進階（核心＋模型全手動）──────────
+  //   兩模式共用同一顆載入鈕與 set_model／request_load 管道，故不會狀態不一致；
+  //   基礎模式只是「幫使用者依硬體挑好那一顆」而已。
+  let _modelMode = "basic";
+  function applyModelMode(mode, persist) {
+    _modelMode = (mode === "advanced") ? "advanced" : "basic";
+    const adv = _modelMode === "advanced";
+    const bp = $("#basic-pane"), ap = $("#advanced-pane"), ax = $("#advanced-extra");
+    if (bp) bp.hidden = adv;
+    if (ap) ap.hidden = !adv;
+    if (ax) ax.hidden = !adv;          // 裝置／加速版本／診斷屬進階
+    $$("#model-mode button").forEach(b => b.classList.toggle("on", b.dataset.v === _modelMode));
+    if (persist) { try { API.setSettings({ modelMode: _modelMode }); } catch (e) {} }
+  }
+  $("#model-mode") && $("#model-mode").addEventListener("click", e => {
+    const b = e.target.closest("button"); if (!b) return;
+    applyModelMode(b.dataset.v, true);
+  });
+
+  async function renderBasic() {
+    let d;
+    try { d = await API.getBasicProfiles(); } catch { return; }
+    const host = $("#basic-profiles");
+    if (!d || !host) return;
+    const hw = $("#basic-hw");
+    if (hw) {
+      const t = hw.querySelector("div");
+      if (t) t.textContent = `${d.hardware}　加速方式：${d.accel}`;
+    }
+    host.innerHTML = "";
+    (d.profiles || []).forEach(p => {
+      const card = document.createElement("label");
+      card.className = "radio-card" + (p.selected ? " sel" : "");
+      card.dataset.key = p.key;
+      card.dataset.core = p.core; card.dataset.model = p.model;
+      card.dataset.note = p.note || "";
+      const state = p.present
+        ? `<span class="chip chip-muted" style="font-weight:400">已下載</span>`
+        : `<span class="chip chip-muted" style="font-weight:400">需下載</span>`;
+      card.innerHTML = `<span class="rd"></span><div class="info">
+        <div class="t">${escapeHtml(p.title)}　${state}</div>
+        <div class="d">${escapeHtml(p.desc || "")}</div>
+        <div class="d" style="margin-top:4px;font-family:var(--font-mono);font-size:11.5px">
+          建議模型：${escapeHtml(p.model)}</div></div>`;
+      host.appendChild(card);
+    });
+    basicNote((d.profiles || []).find(p => p.selected));
+  }
+  function basicNote(p) {
+    const el = $("#basic-note"); if (!el) return;
+    const txt = p && p.note;
+    if (!txt) { el.hidden = true; el.textContent = ""; return; }
+    el.hidden = false; el.textContent = txt;
+  }
+  $("#basic-profiles") && $("#basic-profiles").addEventListener("click", async e => {
+    const card = e.target.closest(".radio-card"); if (!card) return;
+    $$(".radio-card", $("#basic-profiles")).forEach(c => c.classList.toggle("sel", c === card));
+    basicNote({ note: card.dataset.note });
+    // 走與進階模式完全相同的套用路徑（會處理「需重啟」等狀態）
+    _curCore = card.dataset.core;
+    if (_modelOpt) populateModels(_curCore, card.dataset.model);
+    await applyModel(card.dataset.core, card.dataset.model);
+    await renderBasic();
+  });
+
+  // ── 推理加速版本（CrispASR 的 Vulkan / CUDA / CPU build）───────────
+  //   後端依 WMI + nvidia-smi 偵測硬體後給推薦；這裡只負責呈現與回寫選擇。
+  //   實際下載發生在下次載入模型時（換版本＝換核心，需重啟）。
+  async function renderAccel() {
+    let a;
+    try { a = await API.getAccel(); } catch { return; }
+    const host = $("#accel-cards");
+    if (!a || !a.ok || !host) { if (host) host.innerHTML = ""; return; }
+    host.innerHTML = "";
+    (a.options || []).forEach(op => {
+      const card = document.createElement("label");
+      const sel = op.key === a.selected;
+      card.className = "radio-card" + (sel ? " sel" : "");
+      card.dataset.variant = op.key;
+      if (!op.suitable) { card.style.opacity = ".55"; }
+      const tags = [];
+      if (op.recommended) tags.push("建議");
+      if (a.installed && a.installed.variant === op.key
+          && a.installed.version === a.latest) tags.push("已安裝");
+      const tagHtml = tags.length
+        ? ` <span class="chip chip-muted" style="font-weight:400">${tags.join(" · ")}</span>` : "";
+      const noteHtml = op.note ? `　<span style="color:var(--warn,#b26a00)">${escapeHtml(op.note)}</span>` : "";
+      card.innerHTML = `<span class="rd"></span><div class="info">
+        <div class="t">${escapeHtml(op.label)}　<span style="font-weight:400;color:var(--muted)">約 ${op.size_mb} MB</span>${tagHtml}</div>
+        <div class="d">${escapeHtml(op.desc || "")}${noteHtml}</div></div>`;
+      host.appendChild(card);
+    });
+    const rb = $("#accel-reason");
+    if (rb) {
+      if (a.reason) {
+        rb.hidden = false;
+        const t = rb.querySelector("div"); if (t) t.textContent = a.reason;
+      } else rb.hidden = true;
+    }
+    accelMsg(a.needsDownload
+      ? `目前選定的核心尚未下載或版本不符（最新 ${a.latest}），會在下次載入模型時自動取得。`
+      : "", "info");
+  }
+  function accelMsg(text, level) {
+    const el = $("#accel-msg"); if (!el) return;
+    if (!text) { el.hidden = true; el.innerHTML = ""; return; }
+    el.hidden = false; el.style.marginTop = "10px";
+    el.className = "banner " + (level === "warn" ? "banner-warn" : "banner-info");
+    el.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg><div>${escapeHtml(text)}</div>`;
+  }
+  const _accelHost = $("#accel-cards");
+  if (_accelHost) _accelHost.addEventListener("click", async e => {
+    const card = e.target.closest(".radio-card"); if (!card) return;
+    $$(".radio-card", _accelHost).forEach(c => c.classList.toggle("sel", c === card));
+    try {
+      const res = await API.setAccel(card.dataset.variant);
+      if (res && res.message) accelMsg(res.message, res.restartRequired ? "warn" : "info");
+      await renderAccel();
+    } catch (err) { accelMsg(String(err), "warn"); }
+  });
 
   // 點核心卡 → 切核心、模型回該核心首項並套用
   $("#core-cards").addEventListener("click", async e => {
@@ -906,6 +1029,7 @@
     const uiLang = s.uiLang || "繁體中文";
     if ([...$("#set-lang").options].some(o => o.value === uiLang)) $("#set-lang").value = uiLang;
     if (window.I18N) { I18N.setLang(uiLang); refreshViewTitle(); }
+    applyModelMode(s.modelMode || "basic", false);   // 模型頁預設「基礎」
   }
   function segSet(sel, v) { $$(sel + " button").forEach(b => b.classList.toggle("on", b.dataset.v === v)); }
   // 介面縮放：用 CSS zoom（Chromium/WebView2 支援）整體縮放，px 版面也能等比生效。

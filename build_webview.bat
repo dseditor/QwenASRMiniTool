@@ -88,6 +88,7 @@ IF EXIST "%SRC%\dist2\QwenASR-WebView" rmdir /S /Q "%SRC%\dist2\QwenASR-WebView"
     --add-data "%SRC%\endpoint_tab.py;." ^
     --add-data "%SRC%\crisp_engine.py;." ^
     --add-data "%SRC%\subtitle_lines.py;." ^
+    --add-data "%SRC%\cli_mode.py;." ^
     --add-data "%SRC%\chatllm_engine.py;." ^
     --add-data "%SRC%\diarize.py;." ^
     --add-data "%SRC%\processor_numpy.py;." ^
@@ -128,6 +129,7 @@ IF EXIST "%SRC%\dist2\QwenASR-WebView" rmdir /S /Q "%SRC%\dist2\QwenASR-WebView"
     --hidden-import scipy._lib.messagestream ^
     --hidden-import crisp_engine ^
     --hidden-import subtitle_lines ^
+    --hidden-import cli_mode ^
     --hidden-import version ^
     --hidden-import updater ^
     --hidden-import fa_aligner ^
@@ -173,7 +175,11 @@ IF NOT EXIST "%SRC%\crispasr\crispasr.exe" GOTO :after_crispasr
 IF NOT EXIST "%SRC%\dist2\QwenASR-WebView\crispasr\" mkdir "%SRC%\dist2\QwenASR-WebView\crispasr\"
 xcopy "%SRC%\crispasr\*.exe" "%SRC%\dist2\QwenASR-WebView\crispasr\" /Y /Q
 xcopy "%SRC%\crispasr\*.dll" "%SRC%\dist2\QwenASR-WebView\crispasr\" /Y /Q
-echo  crispasr core (exe+dll) copied
+REM Build marker (crispasr_build.json) records version + acceleration variant.
+REM Without it the app treats the bundled core as outdated and re-downloads it
+REM on first model load. Keep the source folder in sync with the release.
+IF EXIST "%SRC%\crispasr\crispasr_build.json" xcopy "%SRC%\crispasr\crispasr_build.json" "%SRC%\dist2\QwenASR-WebView\crispasr\" /Y /Q
+echo  crispasr core (exe+dll+build marker) copied
 :after_crispasr
 
 REM --- ffmpeg: NOT bundled, downloaded on demand ------------------------

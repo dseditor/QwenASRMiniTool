@@ -327,7 +327,35 @@ def open_edge_app(url: str) -> subprocess.Popen | None:
     return None
 
 
+def _cli_argv() -> list[str] | None:
+    """有帶已知子命令（或 --help/--version）→ 回傳要交給 CLI 的 argv；否則 None。
+
+    判斷刻意保守：只認 cli_mode.SUBCOMMANDS 裡的字，其餘一律當作「正常啟動
+    GUI」。這樣就算使用者的捷徑或關聯開檔帶了奇怪參數，也不會意外變成無頭模式。
+    """
+    argv = sys.argv[1:]
+    if not argv:
+        return None
+    from cli_mode import SUBCOMMANDS
+    for a in argv:
+        if a in SUBCOMMANDS:
+            return argv
+        if a in ("-h", "--help", "--version"):
+            return argv
+        if not a.startswith("-"):        # 第一個非旗標不是子命令 → 不是 CLI
+            break
+    return None
+
+
 def main():
+    # ── 無頭 CLI 模式（給外部 Agent／腳本）──────────────────────────────
+    #   帶子命令就完全不開視窗、不起 server，跑完即退並回傳退出碼。
+    cli = _cli_argv()
+    if cli is not None:
+        setup_kill_on_close_job()        # 子程序（crispasr.exe 等）仍要連帶回收
+        from cli_mode import main as cli_main
+        sys.exit(cli_main(cli))
+
     # 先把自己綁進 Job Object：此後 start_load()/轉錄衍生的 crispasr.exe、
     # chatllm main.exe(FA) 等子程序都會自動納入同一 Job，關窗時連帶被殺。
     # handle 由 proc_guard 模組級變數持有（生命週期 == 行程），無須在此保管。

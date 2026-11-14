@@ -132,6 +132,7 @@
 | **介面縮放** | 調整文字與控制項大小 |
 | **輸出格式** | 全域預設 SRT 字幕／純文字（影響單檔・批次・端點）|
 | **語音偵測靈敏度（VAD）** | 降低閾值減少漏識、提高減少假陽性（預設 0.50）|
+| **語音分段路線（CrispASR）** | 內建＝CrispASR 固定視窗切段；**FireRed VAD**＝改用 CrispASR 原生語音偵測，段落切在真正的靜音處（首次啟用自動下載約 2.4MB GGUF）。目前對 **Qwen3／TEA** 模型生效；Whisper／Breeze 因上游「字級對齊(FA)＋VAD」併用會錯亂時間軸，會自動保留 FA、略過 VAD |
 | **每段最長秒數（字級對齊）** | 調短可減少長段歌詞的「段尾字漸漸跑掉」漂移；依模型自動夾低（0.6B 30s／1.7B 10s）。CrispASR 走自身視窗不受此設定影響 |
 | **簡繁詞彙轉換** | 關閉／台灣用語（s2twp）／標準（s2t）|
 | **HuggingFace 鏡像站** | 下載較慢時可改用鏡像（如 hf-mirror.com）|
@@ -150,7 +151,7 @@
 ### CRISPASR（GPU）— 主力核心
 
 以 [CrispASR](https://github.com/CrispStrobe/CrispASR)（whisper.cpp 家族的多後端 runtime，ggml C++）
-加速推理，本版使用 **CrispASR v0.8.32** 核心。
+加速推理，本版使用 **CrispASR v0.8.54** 核心。
 
 **推理加速版本可選**（模型頁「推理加速版本」）：程式會偵測你的顯示卡（Windows 的
 `Win32_VideoController` + `nvidia-smi`）後給出推薦，你可自行改選：
@@ -307,7 +308,8 @@ build_webview.bat              # 產出 dist2\QwenASR-WebView\QwenASR-WebView.ex
 | 0.6B OpenVINO INT8（主／備）| [dseditor](https://huggingface.co/dseditor/Qwen3-ASR-0.6B-INT8_ASYM-OpenVINO) ／ [Echo9Zulu](https://huggingface.co/Echo9Zulu/Qwen3-ASR-0.6B-INT8_ASYM-OpenVINO) |
 | 1.7B OpenVINO INT8 KV-Cache | [dseditor/Qwen3-ASR-1.7B-INT8_OpenVINO](https://huggingface.co/dseditor/Qwen3-ASR-1.7B-INT8_OpenVINO) |
 | 原始 PyTorch 模型 | [Qwen/Qwen3-ASR-0.6B](https://huggingface.co/Qwen/Qwen3-ASR-0.6B) ／ [1.7B](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) |
-| VAD 模型 | [snakers4/silero-vad v4.0](https://github.com/snakers4/silero-vad) |
+| VAD 模型（Qwen 路徑）| [snakers4/silero-vad v4.0](https://github.com/snakers4/silero-vad) |
+| **FireRed VAD GGUF（CrispASR 路徑）** | [cstr/firered-vad-GGUF](https://huggingface.co/cstr/firered-vad-GGUF) |
 | 說話者分離模型 | [altunenes/speaker-diarization-community-1-onnx](https://huggingface.co/altunenes/speaker-diarization-community-1-onnx) |
 
 ---

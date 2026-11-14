@@ -26,7 +26,7 @@ from __future__ import annotations
 #   兩條線自此合流：__version__ 與 WEBVIEW_VERSION 同值，WebView 的 Release 改
 #   為正式版（prerelease=false）成為 releases/latest。CTk 使用者按更新會收到
 #   「遷移提示」而非自動覆蓋（見 updater.is_migration_package）。
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 
 # CTk 桌面版最後一個發佈版本為 1.0.9（新增 Whisper/Breeze-ASR-26 推理核心、
 # qwen3 ForcedAligner 字級對齊、核心切換防當機、字幕分行全引擎統一）。
@@ -90,6 +90,27 @@ _CTK_LAST_VERSION = "1.0.9"
 #   Release 改為正式版並成為 releases/latest。CTk 使用者按「檢查更新」會偵測到
 #   2.0.0 > 1.0.9，但因套件不含其主執行檔，updater 會顯示遷移說明並導向發行頁，
 #   **不會**自動覆蓋既有安裝（見 updater.is_migration_package / apply_update）。
+#
+# ── 2.0.1（修復版）──────────────────────────────────────────────────────────
+#   核心：CrispASR 升級 v0.8.32→v0.8.54。沒有人聲的切片會直接跳過，Qwen3 不再把
+#         長靜音辨識成文字（GitHub issue #31）。
+#   切段：設定頁「語音分段路線」改為三態——自動（預設：Qwen3／TEA 使用 CrispASR
+#         原生 FireRed VAD，段落切在真正的靜音處；Whisper／Breeze 不做語音偵測）、
+#         原生 VAD（Whisper／Breeze 也啟用，改用 Silero VAD，可避免長靜音幻覺，
+#         但會把歌聲當成非人聲略過，只適合純說話素材）、固定視窗（舊行為）。
+#   修復：Qwen3 關閉「時間軸對齊」時字幕整段不切（一行 15 秒以上）——等時內插原本
+#         只對 TEA 生效，現在所有 Qwen3 模型關閉對齊都會正常分行。
+#   修復：字幕行會橫跨靜音（靜音前後的字被併成同一行，顯示時間等於整段靜音）——
+#         共用分行器新增「相鄰字停頓超過 2 秒即換行」。
+#   修復：中英夾雜的字幕出現逐字空白（「golf， 跟 那 個」）——空白改為逐對判斷，
+#         只放在兩個英文詞之間；無對齊時英文單字也不再被拆成逐字母。
+#   模型：新增 Qwen3-ASR-1.7B F16 未量化（cstr 單檔融合式 GGUF，4.7GB；issue #32）。
+#         實測與 Q8 辨識結果約 99% 相同，顯存多約 2.7GB、慢 15～35%，一般仍建議 Q8。
+#   紀錄：轉換完成後顯示音檔長度、耗時、倍速與實際採用的對齊／VAD；CLI 的 JSON
+#         輸出同步新增 stats 欄位。
+#   測試：新增 tests/test_crisp_vad.py（python -m pytest；-m "not slow" 只跑純邏輯）。
+#   已知：Whisper／Breeze 在預設下遇長靜音仍可能辨識出不存在的文字（需手動選
+#         「原生 VAD」）；其「時間軸對齊」開關在 CrispASR 舊路徑上實際不生效。
 #
 # 兩條線已合流：此值與 __version__ 同步，保留常數名是為了不動既有引用
 # （webview_backend._app_version / setting.py 版本徽章）。

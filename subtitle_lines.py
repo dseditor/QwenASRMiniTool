@@ -16,6 +16,10 @@ from __future__ import annotations
 MAX_CHARS      = 20
 _ZH_CLAUSE_END = frozenset('，。？！；：…—、·')
 _EN_SENT_END   = frozenset('.,!?;')
+# 相鄰兩個字之間停頓超過這個秒數就換行。字幕不該橫跨一段沒人講話的時間：
+# 沒有這條時，靜音前最後一個字與靜音後第一個字會落在同一行，那一行的顯示時間
+# 就等於整段靜音（實測 120 秒靜音 → 單行 122 秒）。
+MAX_LINE_GAP   = 2.0
 
 
 def _strip_pua(s: str) -> str:
@@ -31,6 +35,37 @@ def _strip_pua(s: str) -> str:
                    if not (0xE000 <= ord(c) <= 0xF8FF
                            or 0xF0000 <= ord(c) <= 0xFFFFD
                            or 0x100000 <= ord(c) <= 0x10FFFD))
+
+
+def _has_latin(t: str) -> bool:
+    """字串是否含半形英文字母。"""
+    return any(c.isascii() and c.isalpha() for c in t)
+
+
+def _word_sep(a: str, b: str) -> str:
+    """兩個相鄰詞之間該不該放空白（逐對判斷）。
+
+    只有「前詞結尾與後詞開頭都是半形非空白字元，且其中一邊含英文字母」才放
+    空白：`hello`+`world`、`Hello,`+`world`、`iPhone`+`15` 需要；中英相鄰
+    （`打高`+`golf`、`golf，`+`跟`）與純數字相鄰（`1`+`0`）都不需要。
+
+    舊規則是「整行只要含任一英文字就全行用空白串接」，結果一個英文字會讓同一
+    行所有中文字都被空白隔開（「golf， 跟 那 個 游 泳 池」）。
+    """
+    if not a or not b:
+        return ""
+    x, y = a[-1], b[0]
+    if not (x.isascii() and y.isascii()) or x.isspace() or y.isspace():
+        return ""
+    return " " if (_has_latin(a) or _has_latin(b)) else ""
+
+
+def _join_words(words) -> str:
+    """把一行的詞串起來，空白只放在 `_word_sep` 認為需要的位置。"""
+    out = ""
+    for w in words:
+        out = f"{out}{_word_sep(out, w)}{w}" if out else w
+    return out
 
 
 def _srt_ts(s: float) -> str:
@@ -122,8 +157,7 @@ def _merge_orphan_lines(
         return (not _has_latin(t)) and 0 < _vlen(t) <= min_chars
 
     def _join(a: str, b: str) -> str:
-        sep = " " if (_has_latin(a) or _has_latin(b)) else ""
-        return f"{a}{sep}{b}"
+        return f"{a}{_word_sep(a, b)}{b}"
 
     merged: list[tuple[float, float, str, str | None]] = []
     for (s, e, t, spk) in lines:
@@ -170,8 +204,7 @@ def _merge_orphan_lines_rich(
         return (not _has_latin(t)) and 0 < _vlen(t) <= min_chars
 
     def _join(a: str, b: str) -> str:
-        sep = " " if (_has_latin(a) or _has_latin(b)) else ""
-        return f"{a}{sep}{b}"
+        return f"{a}{_word_sep(a, b)}{b}"
 
     merged: list[tuple] = []
     for (s, e, t, spk, w) in lines:
@@ -260,10 +293,7 @@ def _ts_chatllm_to_subtitle_lines(
             return
         start = chunk_offset + ts_items[seg_idx[0]][1]
         end   = chunk_offset + ts_items[seg_idx[-1]][2]
-        if any(_is_latin_word(w) for w in seg_words):
-            text = " ".join(seg_words)
-        else:
-            text = "".join(seg_words)
+        text = _join_words(seg_words)
         text = _conv(text)
         # 字級清單：每個 ts_item → 一個高亮單位（中文＝單字、拉丁＝整詞）
         words = [
@@ -298,6 +328,8 @@ def _ts_chatllm_to_subtitle_lines(
 
         if hit_punct:
             _emit()
+        elif seg_idx and ts_items[wi][1] - ts_items[seg_idx[-1]][2] > MAX_LINE_GAP:
+            _emit()            # 長停頓：即使沒有標點也換行（見 MAX_LINE_GAP）
 
         seg_idx.append(wi)
         seg_words.append(word)

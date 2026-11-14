@@ -177,7 +177,12 @@ def cmd_transcribe(args) -> int:
                 results.append({"input": str(p), "ok": False, "error": str(e)})
                 continue
             segs = _segments_payload(res)
-            item = {"input": str(p), "ok": True,
+            st = res.get("stats") or {}
+            if st.get("elapsedSec"):
+                _spd = f"，{st['speed']} 倍速" if st.get("speed") else ""
+                _log(f"[完成] {p.name}：{len(segs)} 段，音檔 {st.get('audioSec', 0)} 秒，"
+                     f"耗時 {st['elapsedSec']} 秒{_spd}")
+            item = {"input": str(p), "ok": True, "stats": st,
                     "srtPath": res.get("srtPath"), "segments": segs,
                     "text": "".join(s["text"] for s in segs)}
             # -o 只在單檔時有意義；多檔一律用引擎的預設輸出位置

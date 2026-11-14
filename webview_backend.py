@@ -14,8 +14,16 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import traceback
 from pathlib import Path
+
+# 語音分段路線（設定鍵 vad_route）：
+#   auto    預設。Qwen3／TEA 掛 FireRed VAD；Whisper／Breeze 不掛（Silero 會切掉歌聲）。
+#   firered 全部掛原生 VAD：Qwen3／TEA→FireRed、Whisper／Breeze→Silero。
+#   builtin 全部不掛，crispasr 固定視窗切段（舊行為）。
+_VAD_ROUTES = ("auto", "firered", "builtin")
+_VAD_ROUTE_DEFAULT = "auto"
 
 import app as core          # 重用 ASREngine / 常數 / 診斷函式（__main__ guard 保護）
 
@@ -46,6 +54,8 @@ _MODEL_CATALOG = [
     ("Qwen", "Qwen3-ASR-1.7B INT8",         "openvino", {"cpu_model_size": "1.7B"}),
     ("Qwen", "Qwen3-ASR-1.7B Q4 (CRISPASR)", "crispasr", {"crisp_model": "qwen3", "crisp_qwen_quant": "q4"}),
     ("Qwen", "Qwen3-ASR-1.7B Q8 (CRISPASR)", "crispasr", {"crisp_model": "qwen3", "crisp_qwen_quant": "q8"}),
+    # 未量化 F16（4.7GB）。只有標準版有；日語動漫／TEA 的來源 repo 沒有提供。
+    ("Qwen", "Qwen3-ASR-1.7B F16 未量化 (CRISPASR)", "crispasr", {"crisp_model": "qwen3", "crisp_qwen_quant": "f16"}),
     # 日語動漫特化（cstr/qwen3-asr-1.7b-ja-anime）：同架構、針對日語微調，日文歌詞/台詞辨識較佳。
     ("Qwen", "Qwen3-ASR-1.7B 日語動漫 Q4 (CRISPASR)", "crispasr", {"crisp_model": "qwen3-ja", "crisp_qwen_quant": "q4"}),
     ("Qwen", "Qwen3-ASR-1.7B 日語動漫 Q8 (CRISPASR)", "crispasr", {"crisp_model": "qwen3-ja", "crisp_qwen_quant": "q8"}),
@@ -62,7 +72,8 @@ _MODEL_CATALOG = [
 ]
 _BREEZE_QUANT_LABEL = {"q4": "Breeze Q4 (輕量)", "q5": "Breeze Q5 (標準)", "q8": "Breeze Q8 (精確)"}
 _QWEN_CASR_QUANT_LABEL = {"q4": "Qwen3-ASR-1.7B Q4 (CRISPASR)",
-                          "q8": "Qwen3-ASR-1.7B Q8 (CRISPASR)"}
+                          "q8": "Qwen3-ASR-1.7B Q8 (CRISPASR)",
+                          "f16": "Qwen3-ASR-1.7B F16 未量化 (CRISPASR)"}
 _QWEN_JA_CASR_QUANT_LABEL = {"q4": "Qwen3-ASR-1.7B 日語動漫 Q4 (CRISPASR)",
                              "q8": "Qwen3-ASR-1.7B 日語動漫 Q8 (CRISPASR)"}
 _TEA_CASR_QUANT_LABEL = {"q8": "TEA-ASR-1.1 台灣國語 Q8 (CRISPASR)"}
@@ -75,7 +86,12 @@ _TEA_DOMAIN_NOTE = ("⚠️ TEA-ASR 為「台灣國語日常人聲」特化模�
                     "但背景配樂較重的段落或歌曲可能整段無輸出。音樂類素材請改用 "
                     "Qwen3-ASR-1.7B（通用）或 Whisper Breeze。")
 # 模型標籤 → 提醒文字（目前只有 TEA 有；chatllm 的提醒仍依 backend 給）
-_MODEL_NOTES = {_TEA_CASR_QUANT_LABEL["q8"]: _TEA_DOMAIN_NOTE}
+# F16 實測（2026-11-15，RTX 5090 Vulkan，對照 Q8）：辨識文字約 99% 相同（差異多為標點，
+# 個別用字互有出入、看不出誰比較準），顯存多約 2.7GB、耗時多 15～35%、檔案 4.7GB。
+_F16_NOTE = ("未量化版本：檔案約 4.7GB，顯示記憶體比 Q8 多用約 2.7GB、速度慢 15～35%。"
+             "實測辨識結果與 Q8 約 99% 相同，一般使用建議選 Q8。")
+_MODEL_NOTES = {_TEA_CASR_QUANT_LABEL["q8"]: _TEA_DOMAIN_NOTE,
+                _QWEN_CASR_QUANT_LABEL["f16"]: _F16_NOTE}
 
 # ══════════════════════════════════════════════════════════════════════
 # 基礎模式：用「用途」而非「模型名」讓使用者選
@@ -354,6 +370,43 @@ class WebBackend:
         except Exception:
             pass
 
+    # ── VAD 路線（僅 crispasr 路徑適用）────────────────────────────
+    #   builtin：crispasr 用自身固定視窗切段、Qwen(OV/chatllm) 用 silero onnx。
+    #   firered：crispasr 改掛 `--vad -vm firered-vad.gguf`（原生 VAD，C++ 端跑）。
+    #   Qwen 路徑不受此設定影響 —— silero 是 Python 端 onnxruntime，換不了。
+    def _vad_route(self) -> str:
+        r = str(self._settings_raw().get("vad_route") or _VAD_ROUTE_DEFAULT)
+        return r if r in _VAD_ROUTES else _VAD_ROUTE_DEFAULT
+
+    def _ensure_silero_vad(self, cd):
+        """備妥 Silero VAD（Whisper／Breeze 的 VAD，不到 1MB）。
+
+        FireRed 只對 Qwen3／TEA 有效，Whisper 架構要靠這顆（見
+        crisp_engine._vad_plan）。兩顆都很小，開啟 VAD 路線時一起備妥，使用者
+        之後換模型就不必再等下載。失敗只是讓 Whisper 退回不掛 VAD，不擋流程。
+        """
+        try:
+            from downloader import quick_check_silero_vad, download_silero_vad
+            if not quick_check_silero_vad(cd):
+                self._st("下載 Silero VAD 模型（約 0.9MB）…")
+                download_silero_vad(cd, progress_cb=self._dl_progress)
+        except Exception:
+            pass
+
+    def _firered_vad_path(self):
+        """回傳 firered-vad.gguf 路徑（缺檔先下載）；取不到則 None（退回固定視窗）。"""
+        try:
+            from downloader import (quick_check_firered_vad, download_firered_vad,
+                                    firered_vad_filename)
+            cd = self._crispasr_dir()
+            self._ensure_silero_vad(cd)
+            if not quick_check_firered_vad(cd):
+                self._st("下載 FireRed VAD 模型（約 2.4MB）…")
+                download_firered_vad(cd, progress_cb=self._dl_progress)
+            return cd / firered_vad_filename() if quick_check_firered_vad(cd) else None
+        except Exception:
+            return None
+
     def _dl_progress(self, *a):
         """下載進度回呼（容忍 progress_cb(frac) 或 progress_cb(frac, msg)）。"""
         frac = a[0] if a else 0
@@ -472,10 +525,19 @@ class WebBackend:
                     aligner_path = crispasr_dir / aligner_gguf_filename(fa_quant)
                 except Exception:
                     aligner_path = None       # 退回 Whisper 自帶時間軸
+        # VAD 路線：auto（預設）／firered／builtin，見檔頭 _VAD_ROUTES 的說明。
+        # 模型只有 2.4MB，缺檔就地補下載；下載失敗不擋載入，靜默退回固定視窗。
+        _route = self._vad_route()
+        vad_model = self._firered_vad_path() if _route != "builtin" else None
         eng = CrispWhisperEngine()
+        eng.vad_for_whisper = (_route == "firered")
         eng.load(model_path=model_path, crispasr_dir=crispasr_dir,
                  device_id=self._vk_device_id(s), cb=self._st, aligner_path=aligner_path,
-                 gpu_backend=crispasr_gpu_backend(variant))
+                 gpu_backend=crispasr_gpu_backend(variant),
+                 vad_model=vad_model,
+                 vad_threshold=float(s.get("vad_threshold", 0.5) or 0.5))
+        # VAD 切段的段落天花板沿用設定頁「每段最長秒數」（0＝用引擎預設 30s）。
+        eng.vad_max_speech_sec = int(s.get("chunk_secs", 0) or 0)
         self.engine = eng
 
     # ── 狀態 ────────────────────────────────────────────────
@@ -545,6 +607,8 @@ class WebBackend:
             for q in ("q4", "q8"):
                 if quick_check_qwen3_asr_gguf(model_dir, q) or quick_check_qwen3_asr_ja_gguf(model_dir, q):
                     return True
+            if quick_check_qwen3_asr_gguf(model_dir, "f16"):
+                return True
             if quick_check_tea_asr_gguf(model_dir, "q8"):
                 return True
             # chatllm .bin（向下相容）
@@ -647,6 +711,8 @@ class WebBackend:
             except Exception:
                 out_ref = srt_dir / "transcript"
 
+            _audio_sec = self._audio_seconds(audio_path)
+            _t0 = time.perf_counter()
             with self._lock:
                 self._apply_chunk_secs()      # 依設定夾定本次 max_chunk_secs（夾到模型上限）
                 # 清除上一輪字級殘留，避免本輪若提前 return 時讀到舊資料
@@ -664,6 +730,7 @@ class WebBackend:
                     original_path=out_ref,
                     out_format="srt",
                 )
+            _elapsed = time.perf_counter() - _t0
         finally:
             if tmp_extra:
                 try:
@@ -697,9 +764,40 @@ class WebBackend:
             except Exception:
                 traceback.print_exc()          # 退回 SRT，不讓轉錄整體失敗
 
+        stats = self._speed_stats(_audio_sec, _elapsed)
         if progress_cb:
             progress_cb(100, "完成")
-        return {"segments": segments, "srtPath": saved}
+        return {"segments": segments, "srtPath": saved, "stats": stats}
+
+    @staticmethod
+    def _audio_seconds(path) -> float:
+        """音檔長度（秒）；讀不到回 0（速度統計就不顯示倍速，不影響轉錄）。"""
+        try:
+            from audio_io import audio_duration
+            return max(0.0, float(audio_duration(path)))
+        except Exception:
+            return 0.0
+
+    def _speed_stats(self, audio_sec: float, elapsed: float) -> dict:
+        """本次轉錄的速度統計，供前端紀錄與 CLI 輸出。
+
+        speed＝音檔長度 ÷ 耗時（幾倍速，越大越快）。耗時只算辨識本身：不含影片
+        抽音軌、模型下載與說話者分離模型的準備，但含說話者分離的運算。
+        """
+        eng = self.engine
+        return {
+            "audioSec":   round(audio_sec, 2),
+            "elapsedSec": round(elapsed, 2),
+            "speed":      round(audio_sec / elapsed, 2) if elapsed > 0 and audio_sec > 0 else None,
+            "backend":    self._backend_label(getattr(self, "_active_backend", "openvino"),
+                                              "CPU · OpenVINO INT8"),
+            # Whisper／Breeze 走 crispasr 舊路徑，對齊器掛了也不生效（見
+            # crisp_engine._vad_plan 的實測），如實標成未對齊。
+            "aligned":    bool(getattr(eng, "use_aligner", False)
+                               and getattr(eng, "_fa_bin", None)
+                               and getattr(eng, "_backend", "") != "whisper"),
+            "vad":        getattr(eng, "_last_vad_used", None),
+        }
 
     def _resolve_ffmpeg(self):
         """解析 ffmpeg：優先採用設定中手動指定的 ffmpeg_path，否則自動偵測。
@@ -1262,7 +1360,7 @@ class WebBackend:
                                 quick_check_breeze, quick_check_qwen3_asr_gguf,
                                 quick_check_qwen3_asr_ja_gguf, quick_check_aligner_gguf,
                                 quick_check_tea_asr_gguf, crispasr_variants,
-                                _CRISPASR_VERSION)
+                                quick_check_firered_vad, _CRISPASR_VERSION)
         s = self._settings_raw()
         model_dir = self._model_dir()
         crispasr_dir = self._crispasr_dir()
@@ -1339,6 +1437,9 @@ class WebBackend:
                 item("fa", f"時間軸對齊 FA（aligner gguf {fa_quant.upper()}）",
                      quick_check_aligner_gguf(crispasr_dir, fa_quant),
                      "已下載", "未下載（約 643MB，啟用時下載）"),
+                item("firered_vad", "語音分段 VAD（FireRed，crispasr 原生）",
+                     quick_check_firered_vad(crispasr_dir),
+                     "已下載", "未下載（約 2.4MB，設定頁切到 FireRed VAD 時下載）"),
                 item("diar", "說話者分離（外部 ONNX，與 OpenVINO 共用）", diar_ok,
                      "已下載", "未下載（約 32MB，啟用分離時下載）"),
             ],
@@ -1418,6 +1519,9 @@ class WebBackend:
             "theme": s.get("appearance", "light"),
             "uiLang": s.get("ui_lang", "繁體中文"),
             "vad": float(s.get("vad_threshold", 0.5)),
+            # VAD 路線：auto（預設）／firered／builtin
+            "vadRoute": (s.get("vad_route") if s.get("vad_route") in _VAD_ROUTES
+                         else _VAD_ROUTE_DEFAULT),
             "chunkSecs": int(s.get("chunk_secs", 0) or 0),   # 0=自動（依模型上限）
             # 模型頁模式：basic（用途導向，預設）／advanced（核心+模型全手動）
             "modelMode": (s.get("model_mode") if s.get("model_mode") in ("basic", "advanced")
@@ -1441,6 +1545,7 @@ class WebBackend:
         key_map = {"scale": "ui_scale", "format": "output_format",
                    "mirror": "hf_mirror", "ffmpeg": "ffmpeg_path", "theme": "appearance",
                    "uiLang": "ui_lang", "vad": "vad_threshold", "chunkSecs": "chunk_secs",
+                   "vadRoute": "vad_route",
                    "modelMode": "model_mode"}
         for k, v in patch.items():
             if k in key_map:
@@ -1452,6 +1557,10 @@ class WebBackend:
         # ── 即時套用副作用（與 app.py 的 _on_*_change 對齊）──────────────
         if "vad" in patch:
             self._apply_vad(patch["vad"])      # _detect_speech_groups 讀全域，立即生效
+        if "vadRoute" in patch:
+            self._apply_vad_route(patch["vadRoute"])   # crispasr：下一次轉錄即生效
+        if "chunkSecs" in patch:
+            self._apply_vad_max_speech(patch["chunkSecs"])
         if "vocab" in patch:
             self._apply_vocab(*self._vocab_to_flags(patch["vocab"]))
         if "mirror" in patch:
@@ -1535,11 +1644,45 @@ class WebBackend:
             pass
 
     def _apply_vad(self, value):
-        """把 VAD 閾值即時套到 app 模組全域 —— _detect_speech_groups 於呼叫時讀取。"""
+        """把 VAD 閾值即時套到 app 模組全域 —— _detect_speech_groups 於呼叫時讀取。
+
+        crispasr 引擎不讀全域（它是子程序，閾值要當 `-vt` 傳進去），故一併寫到
+        引擎實例上；下一次轉錄組命令列時就會帶上新值。
+        """
         try:
             core.VAD_THRESHOLD = float(value)
         except Exception:
             pass
+        eng = getattr(self, "engine", None)
+        if eng is not None and hasattr(eng, "vad_threshold"):
+            try:
+                eng.vad_threshold = float(value)
+            except Exception:
+                pass
+
+    def _apply_vad_route(self, route):
+        """切換 crispasr 的 VAD 路線（子程序模式 → 免重載模型，下次轉錄生效）。
+
+        非 crispasr 引擎沒有 vad_model 屬性 → 靜默略過（Qwen 路徑固定走 silero）。
+        """
+        eng = getattr(self, "engine", None)
+        if eng is None or not hasattr(eng, "vad_model"):
+            return
+        route = str(route) if str(route) in _VAD_ROUTES else _VAD_ROUTE_DEFAULT
+        eng.vad_for_whisper = (route == "firered")
+        if route == "builtin":
+            eng.vad_model = None
+            return
+        eng.vad_model = self._firered_vad_path()   # 缺檔會就地下載；失敗→None
+
+    def _apply_vad_max_speech(self, secs):
+        """「每段最長秒數」→ crispasr VAD 的 `-vmsd`（0＝引擎預設 30s）。"""
+        eng = getattr(self, "engine", None)
+        if eng is not None and hasattr(eng, "vad_max_speech_sec"):
+            try:
+                eng.vad_max_speech_sec = int(secs or 0)
+            except Exception:
+                pass
 
     def _apply_runtime_prefs(self):
         """啟動時把持久化偏好一次套用到各引擎模組全域（對齊 app._apply_ui_prefs）。
@@ -1550,6 +1693,10 @@ class WebBackend:
         s = self._settings_raw()
         try:
             self._apply_vad(s.get("vad_threshold", 0.5))
+            # 路線／段落天花板：引擎此時多半尚未載入（_load_crispasr 會自己讀
+            # 設定帶進 load()），這裡只負責「引擎已在、設定才變」的情況。
+            self._apply_vad_route(self._vad_route())
+            self._apply_vad_max_speech(s.get("chunk_secs", 0))
         except Exception:
             pass
         vc = s.get("vocab_convert", True)

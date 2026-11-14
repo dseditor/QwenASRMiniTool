@@ -81,6 +81,53 @@ def _find_aligner_gguf(crispasr_dir: Path) -> Path | None:
     return None
 
 
+# crispasr 內建的 VAD 別名（`-vm` 可直接吃這些字串，會自動去 HF 抓模型到
+# ~/.cache/crispasr）。本專案預設自己下載 firered-vad.gguf 放進 crispasr/，
+# 別名只作為「檔案不在但使用者硬指定」時的退路。
+_VAD_ALIASES = {"auto", "silero", "firered", "marblenet", "webrtc", "whisper-vad"}
+
+
+def _normalize_vad_model(v: "Path | str | None") -> "Path | str | None":
+    """把 vad_model 參數正規化：不存在的檔案路徑 → None（退回固定視窗切段）。
+
+    接受三種輸入：Path/str 檔案路徑（存在才採用）、crispasr 別名字串
+    （如 "firered"）、None。回傳 None 代表「這次不掛 --vad」。
+    """
+    if not v:
+        return None
+    if isinstance(v, str) and v.lower() in _VAD_ALIASES:
+        return v.lower()
+    pv = Path(v)
+    return pv if pv.exists() else None
+
+
+def _vad_flags(threshold: float, max_speech_sec: float | None = None) -> list[str]:
+    """VAD 切段參數（crispasr `--vad` 系列旗標）。
+
+    ───────────────────────────────────────────────────────────────
+    ★ 學習貢獻點：切段策略是這條路線唯一需要「調」的地方。
+      crispasr 可用的相關旗標與預設：
+        -vt   N  閾值（0.50）        越低越敏感，漏字少但更容易把雜訊當人聲
+        -vspd N  最短語音 ms（250）  低於此長度的人聲片段直接丟掉
+        -vsd  N  最短靜音 ms（100）  靜音短於此不切段 → 值大＝段落較長、較完整
+        -vmsd N  最長語音 s（無限）  超過就硬切；這條直接決定「段落天花板」
+        -vp   N  語音前後補 ms（30）  補太少會吃掉字頭字尾
+        -vo   N  段間重疊 s（0.10）   重疊大＝邊界字較不易掉，但會重複解碼
+
+      與本專案的關聯（見 chunk-secs-drift）：字級時間軸在「每段內」是單調
+      對齊的，段越長、段尾越容易累積漂移。VAD 切段的好處正是段落邊界落在
+      真正的靜音處，而不是機械式的 30s；但若一段人聲連續超過 30s（歌曲、
+      連珠炮講話），whisper 視窗仍會硬切，此時 -vmsd 就是你的控制點。
+    ───────────────────────────────────────────────────────────────
+    """
+    flags = ["-vt", f"{max(0.05, min(0.95, float(threshold))):.2f}"]
+    # 最長語音長度：沿用「每段最長秒數」設定（webview 設定頁滑桿）；未指定時
+    # 用 30s——whisper 的視窗就是 30s，超過一定會被再切，不如讓 VAD 切在靜音處。
+    ms = float(max_speech_sec or 0)
+    flags += ["-vmsd", f"{ms if ms > 0 else 30.0:.1f}"]
+    return flags
+
+
 def _infer_backend(model_path: Path | str) -> str:
     """依模型檔名推斷 crispasr 後端（--backend）。
 
@@ -260,13 +307,32 @@ class CrispWhisperEngine:
         self._backend    = "whisper"  # crispasr 後端：whisper / qwen3 / qwen3-1.7b …
         self._device_id  = 0       # GPU device id
         self._gpu_backend = "vulkan"  # --gpu-backend；None＝純 CPU（掛 -ng）
+        # ── VAD 路線（crispasr 原生）───────────────────────────────────
+        # None＝不掛 --vad，crispasr 走自身固定視窗（-ck，預設 30s）切段；
+        # Path/別名字串＝掛 `--vad -vm <model>`，由 crispasr 在 C++ 端做語音端點
+        # 偵測後按人聲邊界切段。與 OpenVINO 路徑的 silero onnx 是兩條獨立路線
+        # （那條只服務 Qwen，crispasr.exe 看不到它）。
+        self.vad_model     = None  # Path: firered-vad.gguf（或 "firered" 等別名）
+        self.vad_threshold = 0.5   # -vt；由設定頁的 VAD 滑桿同步
+        self.vad_max_speech_sec = 0  # -vmsd；0＝用 _vad_flags 的預設（30s）
+        self._crispasr_dir = None    # Path: 核心所在目錄（找 Silero VAD 用）
+        # Whisper／Breeze 要不要掛 VAD。預設不掛：Silero 會把歌聲當成非人聲切掉
+        # （實測兩首歌 140→7 字、39→0 字，調低閾值也救不回來），而 Breeze 不掛
+        # VAD 在一般素材上本來就正常。只有使用者明確選「原生 VAD」才設 True，
+        # 換取長靜音不幻覺。Qwen／TEA 的 FireRed 不受此旗標影響。
+        self.vad_for_whisper = False
+        # 上一次 process_file 實際採用的切段方式（"firered"/"silero"/None），
+        # 供上層寫進轉錄紀錄，不必讓使用者猜這次有沒有套 VAD。
+        self._last_vad_used = None
+        self._last_segments_rich = None   # 上一次轉錄的字級結果（卡拉OK側通道）
         self.cc          = None    # OpenCC 轉換器
 
     # ══ 載入 ══════════════════════════════════════════════════════════
 
     def load(self, model_path: Path = None, crispasr_dir: Path = None,
              device_id: int = 0, cb=None, aligner_path: Path = None,
-             backend: str | None = None, gpu_backend: str | None = "vulkan"):
+             backend: str | None = None, gpu_backend: str | None = "vulkan",
+             vad_model: "Path | str | None" = None, vad_threshold: float = 0.5):
         """驗證 crispasr.exe 與模型存在即可（子程序模式無常駐載入）。
 
         aligner_path：qwen3 ForcedAligner GGUF；None 時自動在 crispasr_dir 內尋找。
@@ -279,6 +345,11 @@ class CrispWhisperEngine:
         gpu_backend：crispasr.exe 的 `--gpu-backend`（vulkan / cuda）。傳 None
         代表這份核心是 CPU 版或使用者選了純 CPU 推理 → 改掛 `-ng`。呼叫端應
         依「實際安裝的加速版本」給值（downloader.crispasr_gpu_backend）。
+
+        vad_model：FireRed VAD GGUF 路徑（或 crispasr 別名字串如 "firered"）。
+        給值 → 掛 `--vad -vm <model>`，改用語音端點偵測切段；None → 維持
+        crispasr 自身的固定視窗切段。載入後仍可直接改 eng.vad_model 即時切換
+        （子程序模式，下一次轉錄就生效，不需重載模型）。
         """
         def _s(msg):
             if cb:
@@ -293,6 +364,7 @@ class CrispWhisperEngine:
                 "請將 CrispASR Vulkan 版解壓到 crispasr/ 目錄。"
             )
         self._exe = exe
+        self._crispasr_dir = Path(crispasr_dir)
 
         model_path = Path(model_path) if model_path else (_DEFAULT_CRISPASR_DIR / _DEFAULT_MODEL_NAME)
         if not model_path.exists():
@@ -305,6 +377,9 @@ class CrispWhisperEngine:
         self._gpu_backend = gpu_backend or None
         # 後端：顯式指定優先，否則依模型檔名自動推斷
         self._backend    = backend or _infer_backend(model_path)
+        # VAD 路線：檔案不存在（且非別名字串）就當沒給，靜默退回固定視窗切段
+        self.vad_model     = _normalize_vad_model(vad_model)
+        self.vad_threshold = float(vad_threshold or 0.5)
 
         # ── 偵測 FA 對齊器 GGUF（有則預設啟用）──────────────────────────
         #   先判斷這顆模型能不能用對齊器（見 _FA_INCOMPATIBLE 的說明）；不能用
@@ -332,7 +407,17 @@ class CrispWhisperEngine:
         self.cc = opencc.OpenCC(_opencc_config())
         self.ready = True
         _fa_tag = "  + FA" if self._aligner_path else ""
-        _s(f"就緒（CrispASR / Vulkan / {self._backend}  {model_path.name}{_fa_tag}）")
+        _mode = self._vad_plan(True)[0]
+        if _mode == "legacy":
+            _vad_tag = "  + Silero VAD"
+        elif _mode == "unified":
+            _vad_tag = "  + FireRed VAD"
+        elif self.vad_model and self._backend == "whisper" and self.vad_for_whisper:
+            # 選了 VAD 但這個組合套不上 → 明說，不要讓使用者以為切段已換
+            _vad_tag = "（VAD 未套用：缺 Silero VAD 模型）"
+        else:
+            _vad_tag = ""
+        _s(f"就緒（CrispASR / Vulkan / {self._backend}  {model_path.name}{_fa_tag}{_vad_tag}）")
 
     def rebuild_cc(self):
         """依目前詞彙轉換旗標重建 OpenCC（免重新載入）。"""
@@ -343,6 +428,60 @@ class CrispWhisperEngine:
             pass
 
     # ══ 子程序命令建構（★ 由你定奪：speed/quality 取捨）═════════════════
+
+    def _silero_vad_path(self) -> "Path | None":
+        """核心目錄裡的 Silero VAD GGML（Whisper／Breeze 專用）；沒有就 None。"""
+        d = self._crispasr_dir
+        if not d:
+            return None
+        for g in sorted(Path(d).glob("ggml-silero*.bin")):
+            if g.stat().st_size > 100_000:        # 排除 LFS pointer／下載殘檔
+                return g
+        return None
+
+    def _vad_plan(self, word_level: bool) -> "tuple[str | None, Path | str | None]":
+        """這一次轉錄的 VAD 方案 → (mode, model)。
+
+            mode="unified"  顯式 `--backend X` ＋ `--vad -vm <FireRed>`
+            mode="legacy"   不掛 `--backend`（whisper 舊路徑）＋ `--vad -vm <Silero>`
+            mode=None       不掛 VAD，crispasr 走固定視窗切段
+
+        2026-11-15 實測（crispasr 0.8.54，News.mp3 與「人聲＋120s 靜音＋人聲」）：
+
+            後端            路徑     VAD      結果
+            qwen3 / TEA     unified  FireRed  ✅ 有無 FA 皆正常，段落貼齊人聲邊界
+            whisper(Breeze) legacy   無       ❌ 長靜音段大量幻覺（120s → 2000+ 字）
+            whisper(Breeze) legacy   FireRed  ❌ 被忽略（legacy 路徑不支援）
+            whisper(Breeze) legacy   Silero   ✅ 靜音乾淨，且快很多（39s → 4.5s）
+                                              ❌ 但歌曲的歌聲幾乎全被切掉
+            whisper(Breeze) unified  FireRed  ⚠ 無 FA 可用；掛 `-am -falign` 時間倒退
+
+        兩件事決定了 whisper 的走法：
+        1. legacy 路徑**只吃 Silero**，FireRed 會被整個忽略。
+        2. legacy 路徑上 `-am -falign` **本來就沒有作用**（0.8.32 與 0.8.54 掛不掛
+           輸出逐位元組相同，時間軸一直是 whisper 自帶的）。所以先前「Breeze 為了
+           保住 FA 而略過 VAD」其實沒有保護到任何東西，改走 Silero 不損失精度。
+           unified 路徑才會真的套 FA，但 whisper 模型在那條路徑上 slice 合併會
+           倒退（上游 bug），故不採用。
+
+        因此 whisper：有 Silero → legacy＋Silero；沒有 Silero 時，未掛 FA 才退而
+        用 unified＋FireRed，其餘不掛 VAD。Qwen／TEA 一律 unified＋FireRed。
+        """
+        if not (self.vad_model and word_level):
+            return (None, None)
+        if self._backend == "whisper":
+            if not self.vad_for_whisper:
+                return (None, None)       # 預設：Whisper 不掛 VAD（見 __init__ 說明）
+            silero = self._silero_vad_path()
+            if silero is not None:
+                return ("legacy", silero)
+            if self.use_aligner and self._aligner_path:
+                return (None, None)
+        return ("unified", self.vad_model)
+
+    def _vad_enabled(self, word_level: bool) -> bool:
+        """這一次轉錄有沒有掛 VAD（細節見 `_vad_plan`）。"""
+        return self._vad_plan(word_level)[0] is not None
 
     def _build_cmd(self, audio_path: Path, out_base: Path,
                    language: str | None, word_level: bool = True) -> list[str]:
@@ -374,8 +513,15 @@ class CrispWhisperEngine:
             str(self._exe),
             "-m", str(self._model_path),
         ]
-        # 非 whisper 架構（Qwen3-ASR 等）需顯式指定後端，crispasr 才用對解碼路徑
-        if self._backend and self._backend != "whisper":
+        # 非 whisper 架構（Qwen3-ASR 等）需顯式指定後端，crispasr 才用對解碼路徑。
+        # whisper 架構本可省略 —— 但掛 --vad 時**不能**省：省略會走 crispasr 的
+        # legacy whisper 路徑，那條路徑不支援 FireRedVAD（實測 0.8.32 會印
+        # 「FireRedVAD is not supported in the legacy whisper path」然後整個
+        # 忽略 VAD、照樣固定視窗切段）。顯式 `--backend whisper` 才進 unified
+        # dispatch，VAD 才真的生效。
+        _vad_mode, _vad_model = self._vad_plan(word_level)
+        _vad_on = _vad_mode is not None
+        if self._backend and (self._backend != "whisper" or _vad_mode == "unified"):
             cmd += ["--backend", self._backend]
         # 加速版本：Vulkan／CUDA 走 --gpu-backend + 裝置 id；CPU 版掛 -ng
         # （CPU 版核心沒有 ggml-vulkan/cuda DLL，硬給 --gpu-backend 會啟動失敗）
@@ -398,6 +544,18 @@ class CrispWhisperEngine:
         lang_code = _LANG_MAP.get(language, None) if language else None
         if lang_code:
             cmd += ["-l", lang_code]
+
+        # ── VAD 切段路線（可選）：crispasr 原生語音端點偵測 ────────────────
+        #   未啟用（vad_model=None）→ 不掛任何 --vad 旗標，行為與舊版完全相同
+        #   （crispasr 以固定視窗 -ck 切段）。啟用 → 段落邊界改落在真正的靜音
+        #   處，長檔的空白段不再被硬切開，段尾字級漂移也較不易累積。
+        #   只在檔案模式掛：即時模式（word_level=False）送進來的每一小段，前端
+        #   已用瀏覽器端 RMS 靜音偵測切過，再切一次只會削掉字頭字尾。
+        #   Whisper／Breeze 掛 Silero、Qwen／TEA 掛 FireRed（見 _vad_plan 的實測矩陣）。
+        if _vad_on:
+            cmd += ["--vad", "-vm", str(_vad_model)]
+            cmd += _vad_flags(self.vad_threshold,
+                              getattr(self, "vad_max_speech_sec", 0))
 
         # ── 時間軸對齊（FA）：用 qwen3 ForcedAligner GGUF 覆蓋 whisper native 時間戳 ──
         # 僅檔案模式（word_level）需要精確字級時間軸；即時模式只取文字故不掛。
@@ -469,6 +627,8 @@ class CrispWhisperEngine:
         with tempfile.TemporaryDirectory() as td:
             out_base = Path(td) / "crisp_out"
             cmd = self._build_cmd(audio_path, out_base, language, word_level=True)
+            _vad_mode = self._vad_plan(True)[0]
+            self._last_vad_used = {"legacy": "silero", "unified": "firered"}.get(_vad_mode)
             with self._lock:
                 self._run_streaming(cmd, progress_cb)
             srt_tmp = out_base.with_suffix(".srt")
@@ -484,13 +644,19 @@ class CrispWhisperEngine:
         ts_items, raw_text = _parse_srt_words(raw, drop_punct=is_qwen)
         if not ts_items:
             return None
-        if getattr(self, "_fa_blocked", False):
+        # 這次有沒有真的掛對齊器：模型不相容（TEA）、使用者關掉、或缺模型都算沒有。
+        no_fa = is_qwen and not (self.use_aligner and self._aligner_path)
+        if no_fa:
             # 沒有對齊器時 `-ml 1` 對 qwen3 後端無效，每個 item 會是一整段長文字，
             # 共用分行器便無從斷句（實測整段可達 60 秒）。這裡把長 item 依字元
             # **等時內插**攤成字元級，讓分行器照常做標點切行／MAX_CHARS 保護。
             # 內插時間軸當然不如 CTC 對齊精準，但在「粗到不能看」與「約略正確」
             # 之間，後者對字幕明顯有用；且段落起訖仍是後端給的真實時間。
             ts_items = _interpolate_chars(ts_items)
+        elif _vad_mode == "legacy":
+            # Whisper＋Silero：VAD 把時間軸映回原音檔時，跨越靜音的那個字會被拉長
+            # 成整段靜音的長度（實測單字 96 秒）。收回到貼著鄰字的正常長度。
+            ts_items = _clamp_stretched(ts_items)
 
         # 日語：跳過 OpenCC 繁化。s2twp/s2t 是「簡體中文→繁體中文」轉換，套在日文上
         # 會把日文漢字（会/静/図/学）誤轉成繁中字形（會/靜/圖/學），對日語讀者是錯的
@@ -505,7 +671,7 @@ class CrispWhisperEngine:
         )
         if not lines5:
             return None
-        if getattr(self, "_fa_blocked", False):
+        if no_fa:
             lines5 = _fix_leading_punct(lines5)
         lines = [(s, e, t, sp) for (s, e, t, sp, _w) in lines5]
 
@@ -606,22 +772,61 @@ def _fix_leading_punct(lines5: list[tuple]) -> list[tuple]:
     return out
 
 
+# 內插單位：一串半形英數（含撇號，如 don't）算一個，其餘每個字元各算一個。
+_INTERP_UNIT = re.compile(r"[A-Za-z0-9']+|.", re.S)
+
+
+def _clamp_stretched(items: list[tuple[str, float, float]],
+                     max_dur: float = 2.0, keep: float = 0.3
+                     ) -> list[tuple[str, float, float]]:
+    """把「被拉長跨過靜音」的字級項目收回正常長度。
+
+    一個字不可能唸超過 `max_dur` 秒；超過的一律是 VAD 時間軸映射的產物。收法是
+    貼向「正常長度且緊鄰」的那一側鄰字：後一項正常且相接、前一項不是 → 保留
+    終點；其餘情況保留起點。收完長度為 `keep` 秒。
+    """
+    def _ok(k: int) -> bool:
+        return 0 <= k < len(items) and (items[k][2] - items[k][1]) <= max_dur
+
+    out: list[tuple[str, float, float]] = []
+    for k, (text, s, e) in enumerate(items):
+        if e - s <= max_dur:
+            out.append((text, s, e))
+            continue
+        prev_touch = _ok(k - 1) and abs(items[k - 1][2] - s) < 0.05
+        next_touch = _ok(k + 1) and abs(items[k + 1][1] - e) < 0.05
+        if next_touch and not prev_touch:
+            out.append((text, e - keep, e))
+        else:
+            out.append((text, s, s + keep))
+    return out
+
+
 def _interpolate_chars(items: list[tuple[str, float, float]]
                        ) -> list[tuple[str, float, float]]:
     """把「一段長文字 + 起訖時間」攤成字元級（等時內插）。
 
     只處理長度 > 1 的 item；已是單字元的原樣保留，故對本來就有字級時間軸的
     路徑（掛了 FA）呼叫也不會有副作用。
+
+    半形英數連續字元（`golf`、`resent`、`2026`）視為一個單位、不逐字母拆開，
+    否則分行器會把它當成一串單字母詞，輸出成「g o l f」甚至從中間斷行。每個
+    單位分到的時間與其字元數成正比；空白不佔單位。
     """
     out: list[tuple[str, float, float]] = []
     for text, s, e in items:
-        n = len(text)
-        if n <= 1:
+        if len(text) <= 1:
             out.append((text, s, e))
             continue
-        step = (e - s) / n if e > s else 0.0
-        for i, ch in enumerate(text):
-            out.append((ch, s + step * i, s + step * (i + 1)))
+        units = [u for u in _INTERP_UNIT.findall(text) if not u.isspace()]
+        total = sum(len(u) for u in units)
+        if total == 0:
+            continue
+        step = (e - s) / total if e > s else 0.0
+        pos = 0
+        for u in units:
+            out.append((u, s + step * pos, s + step * (pos + len(u))))
+            pos += len(u)
     return out
 
 

@@ -316,13 +316,13 @@ def download_1p7b(model_dir: Path, progress_cb=None):
 # ══════════════════════════════════════════════════════════════════════
 
 # ── CrispASR 核心：多加速版本（Vulkan / CUDA / CPU）─────────────────────
-# v0.8.32（2026-09-04 release）。GitHub 來源不套用 HF 鏡像。
+# v0.8.54（2026-11-14 release）。GitHub 來源不套用 HF 鏡像。
 #
 # Windows 官方只出 Vulkan / CUDA / CPU 三條路——**沒有** HIP(ROCm) 也沒有 SYCL，
 # 所以 AMD 與 Intel 顯卡的最佳解就是 Vulkan；只有 NVIDIA 才多一條 CUDA 可選。
 # CUDA 包含 runtime DLL（cudart/cublas/cublasLt）故體積極大，是否值得換那點速度
 # 由使用者自己在「推理加速版本」決定，我們只負責推薦。
-_CRISPASR_VERSION  = "0.8.32"
+_CRISPASR_VERSION  = "0.8.54"
 _CRISPASR_REL_BASE = ("https://github.com/CrispStrobe/CrispASR/releases/"
                       f"download/v{_CRISPASR_VERSION}")
 
@@ -333,7 +333,7 @@ _CRISPASR_VARIANTS: dict[str, dict] = {
         "zip":         "crispasr-windows-x86_64-vulkan.zip",
         "label":       "Vulkan（通用 GPU）",
         "short":       "Vulkan",
-        "size_mb":     34,
+        "size_mb":     35,
         "gpu_backend": "vulkan",
         "desc":        "NVIDIA / AMD / Intel 通吃，體積最小。已長期實測穩定，"
                        "無獨立顯卡時亦可走內顯。",
@@ -342,7 +342,7 @@ _CRISPASR_VARIANTS: dict[str, dict] = {
         "zip":         "crispasr-windows-x86_64-cuda.zip",
         "label":       "CUDA 12（NVIDIA 專用）",
         "short":       "CUDA 12",
-        "size_mb":     690,
+        "size_mb":     751,
         "gpu_backend": "cuda",
         "desc":        "NVIDIA 專用，自帶 CUDA 12 runtime。大型語音 LLM 後端"
                        "（Qwen3-ASR）通常比 Vulkan 快，但下載量大得多。",
@@ -351,7 +351,7 @@ _CRISPASR_VARIANTS: dict[str, dict] = {
         "zip":         "crispasr-windows-x86_64-cuda13.zip",
         "label":       "CUDA 13（NVIDIA 新驅動）",
         "short":       "CUDA 13",
-        "size_mb":     484,
+        "size_mb":     543,
         "gpu_backend": "cuda",
         "desc":        "同 CUDA 12 但用較新的 runtime，體積小一些；需要 580 以上"
                        "的 NVIDIA 驅動。",
@@ -360,7 +360,7 @@ _CRISPASR_VARIANTS: dict[str, dict] = {
         "zip":         "crispasr-windows-x86_64-cpu.zip",
         "label":       "CPU（純處理器）",
         "short":       "CPU",
-        "size_mb":     8,
+        "size_mb":     9,
         "gpu_backend": None,
         "desc":        "完全不碰顯卡。速度最慢，但在顯卡驅動有問題時最不會出事。",
     },
@@ -873,6 +873,96 @@ def download_aligner_gguf(crispasr_dir: Path,
         progress_cb(1.0, f"✅ {fname}")
 
 
+# ── FireRed VAD GGUF（CrispASR 原生 VAD 路線，`--vad -vm <gguf>`）─────────
+# crispasr 內建的語音端點偵測模型（FireRedASR 系列的 VAD 部分），由 crispasr
+# 直接在 C++ 端跑，不需 onnxruntime，也不佔 Python 端記憶體。與 OpenVINO 路徑
+# 用的 silero_vad_v4.onnx 是兩條獨立路線：silero 只服務 Qwen(OV/chatllm)，
+# firered 只服務 crispasr.exe 自己的切段。檔案極小（~2.4MB），同作者(cstr)上傳。
+_FIRERED_VAD_REPO = "cstr/firered-vad-GGUF"
+_FIRERED_VAD_BASE = f"https://huggingface.co/{_FIRERED_VAD_REPO}/resolve/main"
+_FIRERED_VAD_FILE = "firered-vad.gguf"        # 單一量化，無 q4/q5/q8 之分
+
+
+def firered_vad_filename() -> str:
+    """FireRed VAD GGUF 檔名（放在 crispasr_dir，與 crispasr.exe 同層）。"""
+    return _FIRERED_VAD_FILE
+
+
+def quick_check_firered_vad(crispasr_dir: Path) -> bool:
+    """FireRed VAD GGUF 是否已存在（排除 LFS pointer）。"""
+    return _file_is_real(Path(crispasr_dir) / _FIRERED_VAD_FILE)
+
+
+def download_firered_vad(crispasr_dir: Path, progress_cb=None):
+    """下載 FireRed VAD GGUF 至 crispasr_dir。progress_cb(pct: float, msg: str)。
+
+    刻意自己下載而不依賴 crispasr 的 `-vm firered` 自動抓取：自動抓取會落到
+    使用者家目錄的 ~/.cache/crispasr（不吃本專案的 HF 鏡像設定、EXE 使用者也
+    看不到檔案在哪）。自己下 → 與其他模型同置 crispasr/，可鏡像、可離線備份。
+    """
+    crispasr_dir = Path(crispasr_dir)
+    crispasr_dir.mkdir(parents=True, exist_ok=True)
+    fname = _FIRERED_VAD_FILE
+    dest  = crispasr_dir / fname
+    if _file_is_real(dest):
+        if progress_cb:
+            progress_cb(1.0, f"{fname} 已存在")
+        return
+
+    def _cb(done: int, total_b: int):
+        if progress_cb and total_b > 0:
+            progress_cb(done / total_b,
+                        f"下載 {fname}…  {done/1_048_576:.1f} / {total_b/1_048_576:.1f} MB")
+
+    _download_file(f"{_FIRERED_VAD_BASE}/{fname}", dest, progress_cb=_cb)
+    if progress_cb:
+        progress_cb(1.0, f"✅ {fname}")
+
+
+# ── Silero VAD GGML（Whisper／Breeze 專用的 VAD）──────────────────────────
+# Whisper 架構的模型（Breeze-ASR-26）走 crispasr 的 legacy whisper 路徑，那條
+# 路徑不吃 FireRed VAD（會印 "FireRedVAD is not supported in the legacy whisper
+# path" 後整個忽略），只吃 whisper.cpp 原生的 Silero GGML。兩者分工：
+#     Qwen3 / TEA      → firered-vad.gguf
+#     Whisper / Breeze → ggml-silero-*.bin
+# 這顆與 OpenVINO 路徑用的 silero_vad_v4.onnx 不是同一個檔（那是 onnxruntime
+# 在 Python 端跑的）。檔案不到 1MB。
+_SILERO_VAD_REPO = "ggml-org/whisper-vad"
+_SILERO_VAD_BASE = f"https://huggingface.co/{_SILERO_VAD_REPO}/resolve/main"
+_SILERO_VAD_FILE = "ggml-silero-v6.2.0.bin"
+
+
+def silero_vad_filename() -> str:
+    """Silero VAD GGML 檔名（放在 crispasr_dir，與 crispasr.exe 同層）。"""
+    return _SILERO_VAD_FILE
+
+
+def quick_check_silero_vad(crispasr_dir: Path) -> bool:
+    """Silero VAD GGML 是否已存在（排除 LFS pointer）。"""
+    return _file_is_real(Path(crispasr_dir) / _SILERO_VAD_FILE)
+
+
+def download_silero_vad(crispasr_dir: Path, progress_cb=None):
+    """下載 Silero VAD GGML 至 crispasr_dir。progress_cb(pct: float, msg: str)。"""
+    crispasr_dir = Path(crispasr_dir)
+    crispasr_dir.mkdir(parents=True, exist_ok=True)
+    fname = _SILERO_VAD_FILE
+    dest  = crispasr_dir / fname
+    if _file_is_real(dest):
+        if progress_cb:
+            progress_cb(1.0, f"{fname} 已存在")
+        return
+
+    def _cb(done: int, total_b: int):
+        if progress_cb and total_b > 0:
+            progress_cb(done / total_b,
+                        f"下載 {fname}…  {done/1_048_576:.1f} / {total_b/1_048_576:.1f} MB")
+
+    _download_file(f"{_SILERO_VAD_BASE}/{fname}", dest, progress_cb=_cb)
+    if progress_cb:
+        progress_cb(1.0, f"✅ {fname}")
+
+
 # ── Qwen3-ASR-1.7B GGUF（CrispASR -casr 後端，Qwen 核心跑在 crispasr.exe）──
 # crispasr.exe --backend qwen3-1.7b：把 Qwen3-ASR 1.7B 當作 CrispASR 的後端，
 # 走 Vulkan（Intel/AMD/NVIDIA 通吃），繁中斷句品質佳（見 crispasr-nemotron-eval）。
@@ -880,14 +970,19 @@ def download_aligner_gguf(crispasr_dir: Path,
 _QWEN3_ASR_GGUF_REPO = "cstr/qwen3-asr-1.7b-GGUF"
 _QWEN3_ASR_GGUF_BASE = f"https://huggingface.co/{_QWEN3_ASR_GGUF_REPO}/resolve/main"
 _QWEN3_ASR_GGUF_FILES = {
-    "q4": "qwen3-asr-1.7b-q4_k.gguf",   # 輕量
-    "q8": "qwen3-asr-1.7b-q8_0.gguf",   # 精確
+    "q4": "qwen3-asr-1.7b-q4_k.gguf",   # 輕量 ~1.49 GB
+    "q8": "qwen3-asr-1.7b-q8_0.gguf",   # 精確 ~2.51 GB
+    # 未量化半精度（GitHub issue #32「希望支援 BF16」）。HF 上另一份
+    # unslothai/Qwen3-ASR-1.7B-GGUF 的 bf16 是 llama.cpp 拆檔格式（architecture=
+    # qwen3vl、311 張量、音訊塔在另一個 mmproj 檔），CrispASR 讀不了；能用的只有
+    # cstr 這份單檔融合式 F16（architecture=qwen3asr、含 399 個 audio.* 張量）。
+    "f16": "qwen3-asr-1.7b-f16.gguf",   # 未量化 ~4.70 GB
 }
 _QWEN3_ASR_GGUF_DEFAULT = "q8"
 
 
 def qwen3_asr_gguf_filename(quant: str = _QWEN3_ASR_GGUF_DEFAULT) -> str:
-    """量化代碼（q4/q8）→ Qwen3-ASR-1.7B GGUF 檔名（未知時回傳 q8 精確）。"""
+    """量化代碼（q4/q8/f16）→ Qwen3-ASR-1.7B GGUF 檔名（未知時回傳 q8 精確）。"""
     return _QWEN3_ASR_GGUF_FILES.get(quant, _QWEN3_ASR_GGUF_FILES[_QWEN3_ASR_GGUF_DEFAULT])
 
 

@@ -2729,7 +2729,16 @@ class App(ctk.CTk):
             if _m:
                 _vk_dev_id = int(_m.group(1))
             self._model_dir = Path(settings.get("model_dir", str(BASE_DIR / "ov_models")))
+            # VAD 路線（與 WebView 設定頁共用同一把設定鍵）：firered 且模型已在
+            # crispasr/ 才啟用。舊版 UI 不主動下載，缺檔就照舊走固定視窗切段。
+            _vad_model = None
+            _vad_route = settings.get("vad_route") or "auto"            # 預設同 WebView
+            if _vad_route != "builtin":
+                from downloader import quick_check_firered_vad, firered_vad_filename
+                if quick_check_firered_vad(crispasr_dir):
+                    _vad_model = crispasr_dir / firered_vad_filename()
             self.engine = CrispWhisperEngine()
+            self.engine.vad_for_whisper = (_vad_route == "firered")
             try:
                 self.engine.load(
                     model_path   = model_path,
@@ -2737,6 +2746,8 @@ class App(ctk.CTk):
                     device_id    = _vk_dev_id,
                     cb           = self._set_status,
                     aligner_path = aligner_path,
+                    vad_model    = _vad_model,
+                    vad_threshold= float(settings.get("vad_threshold", 0.5) or 0.5),
                 )
                 self.after(0, self._on_models_ready)
             except Exception as e:

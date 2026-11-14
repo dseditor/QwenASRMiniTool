@@ -66,6 +66,7 @@ installer/
 
 # ── 開發/測試用腳本 ──────────────────────────────────
 test_*.py
+!tests/test_*.py
 benchmark.py
 check_*.py
 export_onnx.*

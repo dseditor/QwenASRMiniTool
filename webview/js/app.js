@@ -116,7 +116,7 @@
         hint: $("#hint-box").value.trim(),
       });
       renderResult(res.segments);
-      logLine("✓ 完成，共 " + res.segments.length + " 段" + (res.srtPath ? "，已輸出 " + res.srtPath : ""));
+      logLine("✓ 完成，共 " + res.segments.length + " 段" + speedText(res.stats) + (res.srtPath ? "，已輸出 " + res.srtPath : ""));
       $("#btn-open-dir").disabled = false;
       $("#btn-save-sub").disabled = false;
     } catch (err) {
@@ -504,6 +504,25 @@
   $("#btn-save-sub").addEventListener("click", saveSubtitle);
 
   // ── 記錄 ────────────────────────────────────────────────
+  // 轉錄速度摘要（接在「完成」紀錄後面）：音檔長度、耗時、倍速、實際採用的對齊／VAD。
+  // 後端沒回 stats（舊版後端或讀不到音檔長度）時回空字串，紀錄照舊。
+  function speedText(st) {
+    if (!st || !st.elapsedSec) return "";
+    const mmss = (sec) => {
+      const s = Math.round(sec);
+      return s >= 60 ? Math.floor(s / 60) + " 分 " + (s % 60) + " 秒" : s + " 秒";
+    };
+    const parts = [];
+    if (st.audioSec) parts.push("音檔 " + mmss(st.audioSec));
+    parts.push("耗時 " + (st.elapsedSec < 10 ? st.elapsedSec.toFixed(1) + " 秒" : mmss(st.elapsedSec)));
+    if (st.speed) parts.push(st.speed.toFixed(1) + " 倍速");
+    const tags = [];
+    if (st.aligned) tags.push("字級對齊");
+    if (st.vad === "firered") tags.push("FireRed VAD");
+    if (st.vad === "silero") tags.push("Silero VAD");
+    return "（" + parts.join("，") + (tags.length ? "；" + tags.join("＋") : "") + "）";
+  }
+
   function logLine(msg) {
     const el = $("#file-log"); el.hidden = false;
     const d = document.createElement("div"); d.className = "ln"; d.textContent = msg;
@@ -590,6 +609,7 @@
           align: $("#sw-align").checked, hint: "",
         });
         it.status = "done"; it.progress = 1; it.srtPath = res.srtPath;
+        logLine("✓ " + it.name + "：共 " + (res.segments || []).length + " 段" + speedText(res.stats));
       } catch (err) {
         it.status = "failed"; it.progress = 0;
         it.error = (err.message || String(err)).replace(/^⚠\s*/, "");
@@ -1022,6 +1042,7 @@
     $("#set-mirror").value = s.mirror || "";
     $("#set-ffmpeg").value = s.ffmpeg || "";
     if (s.vad != null) { $("#set-vad").value = s.vad; $("#set-vad-val").textContent = (+s.vad).toFixed(2); }
+    segSet("#set-vad-route", s.vadRoute || "auto");   // CrispASR 切段路線
     // 每段最長秒數：0/未設 → 視為上限（slider 顯示 30，後端依模型夾低）
     const cs = (+s.chunkSecs > 0) ? +s.chunkSecs : 30;
     if ($("#set-chunk")) { $("#set-chunk").value = cs; $("#set-chunk-val").textContent = cs + "s"; }
@@ -1045,7 +1066,8 @@
     const v = +e.target.value; $("#set-chunk-val").textContent = v + "s"; API.setSettings({ chunkSecs: v });
   });
   // segmented 控制：點擊切換 + 回寫設定
-  [["#set-format", "format"], ["#set-vocab", "vocab"], ["#set-theme", "theme"]].forEach(([sel, key]) => {
+  [["#set-format", "format"], ["#set-vocab", "vocab"], ["#set-theme", "theme"],
+   ["#set-vad-route", "vadRoute"]].forEach(([sel, key]) => {
     $(sel).addEventListener("click", e => {
       const b = e.target.closest("button"); if (!b) return;
       $$(sel + " button").forEach(x => x.classList.toggle("on", x === b));

@@ -99,6 +99,12 @@
             <option>2</option><option>3</option><option>4</option><option>5</option><option>6</option>
           </select>
           <label class="switch"><input type="checkbox" id="sw-align" checked><span class="track"></span><span data-i18n="file.align">時間軸對齊</span><span class="sw-na" id="align-na" data-i18n="file.alignNA" hidden>（此模型不適用）</span></label>
+          <select class="select" id="sel-translate" data-i18n-title="file.trTip" title="辨識完成後把字幕翻譯成另一種語言（時間軸不變）。首次使用會下載翻譯模型，約 850 MB。">
+            <option value="" data-i18n="file.trOff">不翻譯</option>
+            <option value="zh" data-i18n="file.trZh">翻譯成繁體中文</option>
+            <option value="en" data-i18n="file.trEn">翻譯成英文</option>
+            <option value="ja" data-i18n="file.trJa">翻譯成日文</option>
+          </select>
         </div>
 
         <div class="hint-head">
@@ -135,6 +141,7 @@
           <!-- 卡拉OK舞台：逐字高亮放大跳動（由字級 words 驅動）。預設隱藏，按麥克風鈕切換。 -->
           <div class="karaoke" id="karaoke" hidden>
             <div class="kara-line" id="kara-line"></div>
+            <div class="kara-trans" id="kara-trans" hidden></div>
             <div class="kara-next" id="kara-next"></div>
           </div>
           <div class="subs" id="subs"></div>
@@ -324,6 +331,8 @@
             <input type="range" class="slider" id="set-scale" min="80" max="150" step="5" value="100"><span class="slider-val" id="set-scale-val">100%</span></div>
           <div class="row"><div class="label"><div class="t" data-i18n="set.format">輸出格式</div><div class="d" data-i18n="set.formatDesc">全域預設，影響單檔／批次／端點</div></div>
             <div class="seg" id="set-format"><button class="on" data-v="srt" data-i18n="set.fmtSrt">SRT 字幕</button><button data-v="txt" data-i18n="set.fmtTxt">純文字</button></div></div>
+          <div class="row"><div class="label"><div class="t" data-i18n="set.trKeep">翻譯後保留的字幕</div><div class="d" data-i18n="set.trKeepDesc">在「音檔辨識」選了翻譯時生效。「原文＋譯文」會存成兩個檔案（譯文檔名多一段語言代碼，例如 .zh-TW.srt）；「只留譯文」則以譯文取代原文。</div></div>
+            <div class="seg" id="set-translate-keep"><button class="on" data-v="both" data-i18n="set.trKeepBoth">原文＋譯文</button><button data-v="only" data-i18n="set.trKeepOnly">只留譯文</button></div></div>
           <div class="row"><div class="label"><div class="t" data-i18n="set.vad">語音偵測靈敏度（VAD）</div><div class="d" data-i18n="set.vadDesc">降低閾值可減少漏識（被當成空白的片段可能有聲音）；提高則減少假陽性。預設 0.50</div></div>
             <input type="range" class="slider" id="set-vad" min="0.30" max="0.80" step="0.01" value="0.50"><span class="slider-val" id="set-vad-val">0.50</span></div>
           <div class="row"><div class="label"><div class="t" data-i18n="set.vadRoute">語音分段路線（CrispASR）</div><div class="d" data-i18n="set.vadRouteDesc">自動（預設）＝Qwen3／TEA 模型使用 CrispASR 原生的 FireRed VAD，段落切在真正的靜音處，長靜音不會被辨識成文字；Whisper／Breeze 模型不做語音偵測。原生 VAD＝Whisper／Breeze 也啟用（Silero VAD），可避免長靜音被辨識成文字，但歌曲的歌聲會被當成非人聲略過，只適合純說話的素材。固定視窗＝全部不做語音偵測，每 30 秒硬切一段（舊行為）。首次啟用自動下載約 3MB 模型。Qwen（OpenVINO／chatllm）路徑固定走 silero，不受此設定影響。</div></div>

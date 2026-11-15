@@ -327,6 +327,9 @@ class WebViewServer:
                     "nSpeakers": fields.get("n_speakers", ""),
                     "align": (fields.get("align", "1") or "").lower() in ("1", "true", "on", "yes"),
                     "hint": fields.get("hint", ""),
+                    # 翻譯目標（zh/en/ja；空＝不翻譯）與保留方式（both/only）
+                    "translate": (fields.get("translate") or "").strip(),
+                    "translateKeep": (fields.get("translate_keep") or "").strip(),
                 }
                 try:
                     result = server.backend.transcribe(

@@ -89,6 +89,7 @@ IF EXIST "%SRC%\dist2\QwenASR-WebView" rmdir /S /Q "%SRC%\dist2\QwenASR-WebView"
     --add-data "%SRC%\crisp_engine.py;." ^
     --add-data "%SRC%\subtitle_lines.py;." ^
     --add-data "%SRC%\cli_mode.py;." ^
+    --add-data "%SRC%\translator.py;." ^
     --add-data "%SRC%\chatllm_engine.py;." ^
     --add-data "%SRC%\diarize.py;." ^
     --add-data "%SRC%\processor_numpy.py;." ^
@@ -130,6 +131,7 @@ IF EXIST "%SRC%\dist2\QwenASR-WebView" rmdir /S /Q "%SRC%\dist2\QwenASR-WebView"
     --hidden-import crisp_engine ^
     --hidden-import subtitle_lines ^
     --hidden-import cli_mode ^
+    --hidden-import translator ^
     --hidden-import version ^
     --hidden-import updater ^
     --hidden-import fa_aligner ^

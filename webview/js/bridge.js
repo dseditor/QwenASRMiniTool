@@ -96,7 +96,7 @@
     async pickFile() { return null; },            // 瀏覽器環境一律用 <input type=file>
     async loadHintTxt() { return null; },
 
-    // opts: {file, language, diarize, nSpeakers, align, hint}
+    // opts: {file, language, diarize, nSpeakers, align, hint, translate, translateKeep}
     async transcribe(opts) {
       if (MODE === "web") return webTranscribe(opts);
       return mockTranscribe(opts);
@@ -226,6 +226,10 @@
     fd.append("diarize", opts.diarize ? "1" : "0");
     if (opts.nSpeakers && opts.nSpeakers !== "auto") fd.append("n_speakers", String(opts.nSpeakers));
     if (opts.hint) fd.append("hint", opts.hint);
+    if (opts.translate) {
+      fd.append("translate", opts.translate);
+      fd.append("translate_keep", opts.translateKeep === "only" ? "only" : "both");
+    }
     emit("progress", { pct: 3, status: "上傳中…" });
     const r = await fetch(withKey("/api/transcribe"), { method: "POST", body: fd, headers: authHeaders() });
     if (!r.ok) {
@@ -242,7 +246,7 @@
   const MOCK = {
     cancelled: false,
     status: { modelReady: true, backend: "GPU · CRISPASR（Vulkan）", device: "NVIDIA GeForce RTX", version: "webview 0.1", appName: "聲音辨識小工具", hasAnyModel: false, selectedReady: false },
-    settings: { scale: 100, format: "srt", vocab: "s2twp", mirror: "", ffmpeg: "", theme: "light", uiLang: "繁體中文", vad: 0.5, vadRoute: "auto", chunkSecs: 0, lineChars: 42 },
+    settings: { scale: 100, format: "srt", vocab: "s2twp", mirror: "", ffmpeg: "", theme: "light", uiLang: "繁體中文", vad: 0.5, vadRoute: "auto", chunkSecs: 0, lineChars: 42, translate: "", translateKeep: "both" },
     endpoint: { running: true, host: "192.168.1.20", port: 11435, key: "k_8x2pf3qd7m1c", url: "" },
     tunnel: { running: false, url: "", status: "" },
     basicProfiles: {

@@ -732,7 +732,7 @@ class ASREngine:
             if "<asr_text>" in raw:
                 raw = raw.split("<asr_text>", 1)[1]
             text = raw.strip()
-            return text if _g_output_simplified else self.cc.convert(text)
+            return _subs.to_traditional(self.cc, text, _g_output_simplified)
 
     def _enforce_chunk_limit(
         self,
@@ -900,7 +900,7 @@ class ASREngine:
                 if spaced is not None:
                     est = [(s, e, line) for (s, e, line, _sp, _w) in spaced]
                 else:
-                    text = raw_text if _g_output_simplified else self.cc.convert(raw_text)
+                    text = _subs.to_traditional(self.cc, raw_text, _g_output_simplified)
                     est = _assign_ts(_split_to_lines(text), g0, g1)
                 for s, e, line in est:
                     all_subs.append((s, e, line, spk))

@@ -132,6 +132,10 @@ def _segments_payload(res: dict) -> list[dict]:
                 "text": s.get("text", "")}
         if s.get("speaker"):
             item["speaker"] = s["speaker"]
+        if s.get("translation"):
+            item["translation"] = s["translation"]
+        if s.get("trCont"):             # 與上一段同一句，共用同一筆譯文
+            item["trCont"] = True
         out.append(item)
     return out
 
@@ -178,6 +182,8 @@ def cmd_transcribe(args) -> int:
                     "diarize": bool(args.diarize),
                     "nSpeakers": args.speakers,
                     "align": not args.no_align,
+                    "translate": args.translate or "",
+                    "translateKeep": "only" if args.translate_only else "both",
                 }, progress_cb=lambda pct, msg: _log(f"  {pct:3d}%  {msg}"))
             except Exception as e:
                 _log(f"[錯誤] {p.name}：{e}")
@@ -193,6 +199,17 @@ def cmd_transcribe(args) -> int:
             item = {"input": str(p), "ok": True, "stats": st,
                     "srtPath": res.get("srtPath"), "segments": segs,
                     "text": "".join(s["text"] for s in segs)}
+            tr = res.get("translation")
+            if tr:
+                item["translation"] = tr
+                if tr.get("error"):
+                    _log(f"[警告] 翻譯失敗（原文字幕仍已輸出）：{tr['error']}")
+                elif tr.get("skipped"):
+                    _log(f"[翻譯] {tr['skipped']}")
+                if tr.get("ok") and args.translate_only:
+                    # -o 的輸出跟著「只留譯文」走（跨行句子併成一格）
+                    from translator import merge_translated
+                    segs = merge_translated(segs)
             # -o 只在單檔時有意義；多檔一律用引擎的預設輸出位置
             if args.output and len(args.audio) == 1:
                 dest = Path(args.output)
@@ -383,6 +400,11 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--diarize", action="store_true", help="啟用說話者分離")
     t.add_argument("--speakers", type=int, help="說話者人數（留空＝自動）")
     t.add_argument("--no-align", action="store_true", help="關閉字級時間軸對齊")
+    t.add_argument("--translate", choices=("zh", "en", "ja"),
+                   help="轉錄後翻譯成繁體中文／英文／日文（原文與譯文各存一份；"
+                        "首次使用會下載翻譯模型）")
+    t.add_argument("--translate-only", action="store_true",
+                   help="搭配 --translate：只保留譯文，不另存原文")
     t.set_defaults(func=cmd_transcribe)
 
     a = sub.add_parser("apply", parents=[common], help="把校正過的 segments JSON 寫回字幕（保留時間軸）")

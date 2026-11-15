@@ -26,7 +26,7 @@ from __future__ import annotations
 #   兩條線自此合流：__version__ 與 WEBVIEW_VERSION 同值，WebView 的 Release 改
 #   為正式版（prerelease=false）成為 releases/latest。CTk 使用者按更新會收到
 #   「遷移提示」而非自動覆蓋（見 updater.is_migration_package）。
-__version__ = "2.0.1"
+__version__ = "2.1.0"
 
 # CTk 桌面版最後一個發佈版本為 1.0.9（新增 Whisper/Breeze-ASR-26 推理核心、
 # qwen3 ForcedAligner 字級對齊、核心切換防當機、字幕分行全引擎統一）。
@@ -111,6 +111,31 @@ _CTK_LAST_VERSION = "1.0.9"
 #   測試：新增 tests/test_crisp_vad.py（python -m pytest；-m "not slow" 只跑純邏輯）。
 #   已知：Whisper／Breeze 在預設下遇長靜音仍可能辨識出不存在的文字（需手動選
 #         「原生 VAD」）；其「時間軸對齊」開關在 CrispASR 舊路徑上實際不生效。
+#
+# ── 2.1.0（字幕翻譯、分行修正、RTX Spark 支援）──────────────────────────────
+#   翻譯：轉錄後可再翻譯成繁體中文／英文／日文（LinguaForge Qwen3.5-0.8B，經
+#         CrispASR 的對話伺服器執行，首次使用才下載約 850MB）。以「句子」為單位
+#         翻譯而非逐行；預設原文與譯文各存一份（name.srt＋name.zh-TW.srt），
+#         設定頁可改成只留譯文。字幕卡與逐字顯示會原文／譯文對照。
+#         命令列：transcribe --translate zh|en|ja [--translate-only]。
+#   修復：CrispASR 0.8.54 把標點黏在前一個字後面，分行器的切點因此逐漸往後偏，
+#         字幕會切在詞中間（「主角小｜慧，她才剛」）。**2.0.1 的中文與日文都受
+#         影響**。同時讓分行器本身耐得住帶標點的項目。
+#   修復：語言設「自動」時日文被轉成繁體字形（学校→學校）。改為依內容判斷，
+#         有假名就不做簡繁轉換，三個推理核心共用。
+#   修復：日文超長行改在停頓或助詞後換行，不再硬切在詞中間。
+#   修復：英文／韓文字幕不照句子分行、標點被丟掉（#13、#15、#28）——改走空白分詞
+#         語言專用的分行；Whisper／Breeze 的對齊開關在不生效時據實停用；長檔在
+#         模型載入與語音分析階段會回報已等待時間；命令列退回其他核心視為失敗。
+#   設定：新增「每行字數上限」滑桿（英文／韓文等以空白分詞的語言）。
+#   硬體：新增「CUDA · RTX Spark 專用（Windows ARM）」加速版本——CrispASR 官方
+#         沒有 Windows ARM64 的 CUDA 版，這是用同版號原始碼原生編譯的核心，連
+#         CUDA 13 元件一併提供。Windows ARM 上只開放 CrispASR 核心（OpenVINO 與
+#         chatllm 是載入本程式行程的 x64 元件，只能被模擬執行，故不提供）。
+#   測試：新增 tests/test_translator.py、test_japanese_lines.py、
+#         test_spaced_lines.py、test_accel_variants.py。
+#   已知：翻譯模型只有 0.8B，缺上下文的單句仍會翻錯；日文旁白／文學性內容品質
+#         普通；韓文不在翻譯支援範圍。只含一個假名的極短片段仍會被當成中文處理。
 #
 # 兩條線已合流：此值與 __version__ 同步，保留常數名是為了不動既有引用
 # （webview_backend._app_version / setting.py 版本徽章）。

@@ -423,6 +423,8 @@ textarea.input { resize: vertical; min-height: 64px; font-size: 13px; line-heigh
 .spk-2 { background: #EDEAF6; color: #5B4B9A; }
 .spk-3 { background: #F6EFE3; color: #8A6312; }
 .sub-card .txt { font-size: 13.5px; color: var(--ink); line-height: 1.6; }
+/* 譯文：對照顯示在原文下方，次要色、略小 */
+.sub-card .tr { font-size: 12.5px; color: var(--muted); line-height: 1.55; margin-top: 2px; }
 
 /* 說話者外框色：左側邊框依說話者著色（與 chip 同色系），快速辨識發言者 */
 .sub-card.spkc-1 { border-left-color: var(--accent); }
@@ -621,6 +623,11 @@ textarea.input { resize: vertical; min-height: 64px; font-size: 13px; line-heigh
 .kara-line {
   font-size: clamp(26px, 4.4vw, 46px); font-weight: 700; line-height: 1.5;
   text-align: center; letter-spacing: .02em; max-width: 100%;
+}
+/* 對照譯文：逐字高亮行的正下方，整行顯示（譯文沒有字級時間） */
+.kara-trans {
+  font-size: clamp(16px, 2.4vw, 26px); font-weight: 600; line-height: 1.5;
+  color: var(--ink); text-align: center; max-width: 100%; margin-top: -8px;
 }
 .kara-next {
   font-size: clamp(14px, 1.8vw, 19px); font-weight: 500; color: var(--muted);

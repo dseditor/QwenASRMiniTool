@@ -37,6 +37,78 @@ def _strip_pua(s: str) -> str:
                            or 0x100000 <= ord(c) <= 0x10FFFD))
 
 
+def _is_kana(c: str) -> bool:
+    """平假名或片假名（不含中點「・」——中文譯名也會用到）。"""
+    return 0x3041 <= ord(c) <= 0x30FF and c != "・"
+
+
+def _is_han(c: str) -> bool:
+    o = ord(c)
+    return 0x3400 <= o <= 0x4DBF or 0x4E00 <= o <= 0x9FFF or 0xF900 <= o <= 0xFAFF
+
+
+def looks_japanese(text: str) -> bool:
+    """這段文字是不是日文（看內容，不看使用者選的語言）。
+
+    語言常是「自動」，引擎事先不知道是日文；而簡繁轉換（OpenCC s2twp／s2t）
+    套在日文上會把日文漢字改成繁體中文字形（学校→學校、本当→本當、会→會），
+    對日文讀者是錯字。判斷依據是假名：中文不用假名，日文一定有。門檻設「至少
+    兩個假名、且佔假名＋漢字的一成以上」，中文句子裡偶爾夾一個「の」不會誤判。
+    """
+    kana = sum(1 for c in text if _is_kana(c))
+    if kana < 2:
+        return False
+    han = sum(1 for c in text if _is_han(c))
+    return kana >= 0.1 * (kana + han)
+
+
+def to_traditional(cc, text: str, simplified: bool = False) -> str:
+    """簡→繁轉換的共用入口：簡體輸出模式、沒有轉換器、或內容是日文時原樣返回。"""
+    if simplified or cc is None or not text or looks_japanese(text):
+        return text
+    return cc.convert(text)
+
+
+# 日文行超過長度上限時用來挑換行位置的字元集（見 _ja_soft_cut）
+_JA_PARTICLES  = frozenset("はがをにでともへのや")
+_JA_NO_START   = frozenset("ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮーんン")
+_JA_HONORIFIC  = frozenset("おご御")
+
+
+def _ja_soft_cut(words, starts, ends) -> int:
+    """日文行超長時，回傳「前幾個項目留在這一行」；找不到好位置回 len(words)（照舊整行送出）。
+
+    日文不以空白分詞，硬在上限處切會切在詞中間（「子犬のぬい｜ぐるみ」「とん｜
+    ぐり」）。沒有斷詞器，改用兩個便宜但有效的線索在行的後半段挑位置：
+      • 字與字之間的停頓——說話時的換氣點幾乎都落在文節邊界；
+      • 文字種類的交界——平假名（多半是助詞／語尾）後面接漢字或片假名，
+        通常就是下一個詞的開頭。「お／ご」是接頭詞，不算。
+    並且絕不讓促音、拗音、長音、「ん」落在行首。
+    """
+    n = len(words)
+    best, best_score = n, 0.0
+    for c in range(max(2, n // 2), n):
+        a, b = words[c - 1][-1:], words[c][:1]
+        if not a or not b or b in _JA_NO_START:
+            continue
+        score = min(max(starts[c] - ends[c - 1], 0.0), 0.5) * 20.0
+        a_hira = 0x3041 <= ord(a) <= 0x309F
+        b_hira = 0x3041 <= ord(b) <= 0x309F
+        if a_hira and not b_hira and (_is_han(b) or _is_kana(b)):
+            if a not in _JA_HONORIFIC:
+                score += 3.0 + (2.0 if a in _JA_PARTICLES else 0.0)
+        elif _is_han(a) and _is_han(b):
+            score -= 3.0                      # 漢字複合詞中間
+        elif _is_han(a) and b_hira:
+            score -= 2.0                      # 送假名（描｜いた）
+        elif _is_kana(a) and _is_kana(b) and not a_hira and not b_hira:
+            score -= 5.0                      # 片假名詞中間
+        score -= (n - c) * 0.2                # 其餘條件相同時，第一行留長一點
+        if score > best_score:
+            best, best_score = c, score
+    return best
+
+
 def _has_latin(t: str) -> bool:
     """字串是否含半形英文字母。"""
     return any(c.isascii() and c.isalpha() for c in t)
@@ -598,6 +670,10 @@ def _ts_chatllm_to_subtitle_lines(
 
     word_list = [w for (w, _s, _e) in ts_items]
     n = len(ts_items)
+    # 內容是日文 → 不做簡繁轉換（見 looks_japanese），超長行改挑文節邊界換行。
+    japanese = looks_japanese(raw_text)
+    if japanese:
+        cc = None
 
     # 私用區（PUA）字元防線：這些不是任何模型的合法輸出，而是下游元件把「無法
     # 映射的類別 ID」直接當成字元渲染的結果（實例：crispasr 的 qwen3 CTC 對齊器
@@ -618,25 +694,39 @@ def _ts_chatllm_to_subtitle_lines(
     def _is_latin_word(w: str) -> bool:
         return any(c.isascii() and c.isalpha() for c in w)
 
-    def _emit():
+    def _emit(punct: str = "", upto: int | None = None):
+        """送出目前這一行。
+
+        punct：造成這次換行的標點（輸出不帶標點，但「這一行後面是句號還是
+               逗號」對下游有用——翻譯要靠它把字幕行重組成完整句子），記在
+               該行最後一個字級項目的 ``punct`` 欄位。
+        upto ：只送出前 upto 個項目，其餘留在下一行（日文超長行的軟換行）。
+        """
         nonlocal seg_idx, seg_words
         if not seg_idx:
             seg_idx = []; seg_words = []
             return
-        start = chunk_offset + ts_items[seg_idx[0]][1]
-        end   = chunk_offset + ts_items[seg_idx[-1]][2]
-        text = _join_words(seg_words)
+        idx, wds = seg_idx, seg_words
+        rest_idx: list[int] = []; rest_wds: list[str] = []
+        if upto is not None and 0 < upto < len(seg_idx):
+            idx, wds = seg_idx[:upto], seg_words[:upto]
+            rest_idx, rest_wds = seg_idx[upto:], seg_words[upto:]
+        start = chunk_offset + ts_items[idx[0]][1]
+        end   = chunk_offset + ts_items[idx[-1]][2]
+        text = _join_words(wds)
         text = _conv(text)
         # 字級清單：每個 ts_item → 一個高亮單位（中文＝單字、拉丁＝整詞）
         words = [
             {"start": chunk_offset + ts_items[k][1],
              "end":   chunk_offset + ts_items[k][2],
              "text":  _conv(word_list[k])}
-            for k in seg_idx
+            for k in idx
         ]
+        if punct and words:
+            words[-1]["punct"] = punct
         if end > start and text.strip():
             result.append((start, end, text.strip(), spk, words))
-        seg_idx = []; seg_words = []
+        seg_idx = rest_idx; seg_words = rest_wds
 
     def _over_limit() -> bool:
         if any(_is_latin_word(w) for w in seg_words):
@@ -648,10 +738,11 @@ def _ts_chatllm_to_subtitle_lines(
 
         # 在 raw_text 中前進到 word 位置；遇到標點（或 whisper 空白）→ 先切行
         hit_punct = False
+        seen_punct = ""
         while ri < len(raw_text):
             c = raw_text[ri]
             if c in _all_punct:
-                hit_punct = True; ri += 1; continue
+                hit_punct = True; seen_punct += c; ri += 1; continue
             if c == " ":
                 if break_on_space:
                     hit_punct = True   # whisper：空白＝語句邊界，視同切點
@@ -659,16 +750,19 @@ def _ts_chatllm_to_subtitle_lines(
             break
 
         if hit_punct:
-            _emit()
+            _emit(seen_punct)
         elif seg_idx and ts_items[wi][1] - ts_items[seg_idx[-1]][2] > MAX_LINE_GAP:
             _emit()            # 長停頓：即使沒有標點也換行（見 MAX_LINE_GAP）
 
         seg_idx.append(wi)
         seg_words.append(word)
 
-        # 跳過 word 在 raw_text 中佔用的字元（依長度計數，忽略標點/空格）
+        # 跳過 word 在 raw_text 中佔用的字元（依長度計數，忽略標點/空格）。
+        # 長度只算「非標點」的字元：項目本身帶標點時（CrispASR 0.8.54 把標點黏在
+        # 前一個字後面：`中、`、`呢。`）若照 len() 算，每遇到一個標點指標就多走
+        # 一格，之後所有切點都往後偏，行尾就落在詞中間（「主角小｜慧，她才剛」）。
         consumed = 0
-        word_len = len(word)
+        word_len = sum(1 for ch in word if ch not in _all_punct and ch != " ")
         while ri < len(raw_text) and consumed < word_len:
             c = raw_text[ri]
             if c in _all_punct or c == " ":
@@ -676,9 +770,14 @@ def _ts_chatllm_to_subtitle_lines(
             ri += 1; consumed += 1
 
         if _over_limit():
-            _emit()
+            if japanese and not any(_is_latin_word(w) for w in seg_words):
+                _emit(upto=_ja_soft_cut(seg_words,
+                                        [ts_items[k][1] for k in seg_idx],
+                                        [ts_items[k][2] for k in seg_idx]))
+            else:
+                _emit()
 
-    _emit()
+    _emit("".join(c for c in raw_text[ri:] if c in _all_punct))
     merged = _merge_orphan_lines_rich(result)
     if with_words:
         return merged

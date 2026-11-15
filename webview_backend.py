@@ -90,6 +90,24 @@ _TEA_DOMAIN_NOTE = ("⚠️ TEA-ASR 為「台灣國語日常人聲」特化模�
 # 個別用字互有出入、看不出誰比較準），顯存多約 2.7GB、耗時多 15～35%、檔案 4.7GB。
 _F16_NOTE = ("未量化版本：檔案約 4.7GB，顯示記憶體比 Q8 多用約 2.7GB、速度慢 15～35%。"
              "實測辨識結果與 Q8 約 99% 相同，一般使用建議選 Q8。")
+# ── Windows on ARM（RTX Spark）：只開放 CrispASR 核心 ─────────────────
+#   本程式是 x64 執行檔，在 ARM 機器上是模擬執行。CrispASR 是獨立的子程序，
+#   有原生 ARM64 的 Spark 專用編譯版可用；OpenVINO 與 chatllm 則是載進本程式
+#   行程裡的 x64 DLL，只能跟著被模擬（慢，且沒有對應的 ARM 加速），所以在這種
+#   機器上直接不提供：模型清單、用途建議、系統自檢都只列 CrispASR，設定檔裡
+#   若記著別的核心也一律改回 CrispASR。
+_ARM_ONLY_NOTE = "這台是 Windows ARM 裝置，只提供 CrispASR 核心（OpenVINO 與 chatllm 不適用）。"
+
+
+def crisp_only() -> bool:
+    """這台機器是否只開放 CrispASR 核心（Windows on ARM）。"""
+    try:
+        from downloader import host_arch
+        return host_arch() == "arm64"
+    except Exception:
+        return False
+
+
 _MODEL_NOTES = {_TEA_CASR_QUANT_LABEL["q8"]: _TEA_DOMAIN_NOTE,
                 _QWEN_CASR_QUANT_LABEL["f16"]: _F16_NOTE}
 
@@ -275,11 +293,20 @@ class WebBackend:
             cur = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
         except Exception:
             cur = {}
-        if cur.get("backend"):
+        if crisp_only():
+            # Windows ARM：設定檔裡記著別的核心（例如整個資料夾從 x64 機器搬過來）
+            # 也改回 CrispASR；這類機器是 RTX Spark，顯示記憶體充裕，預設給 Q8。
+            if cur.get("backend") == "crispasr":
+                return
+            cur["backend"] = "crispasr"
+            cur.setdefault("crisp_model", "qwen3")
+            cur.setdefault("crisp_qwen_quant", "q8")
+        elif cur.get("backend"):
             return                       # 既有設定 → 不覆寫
-        cur.setdefault("backend", "crispasr")
-        cur.setdefault("crisp_model", "qwen3")
-        cur.setdefault("crisp_qwen_quant", "q4")
+        else:
+            cur.setdefault("backend", "crispasr")
+            cur.setdefault("crisp_model", "qwen3")
+            cur.setdefault("crisp_qwen_quant", "q4")
         try:
             f.write_text(json.dumps(cur, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
@@ -319,8 +346,9 @@ class WebBackend:
         except Exception as e:
             traceback.print_exc()
             head = str(e).splitlines()[0][:110] if str(e) else type(e).__name__
-            # GPU 核心載入失敗 → 退回 CPU(OpenVINO)，但明確告知(非靜默回退)
-            if backend != "openvino":
+            # GPU 核心載入失敗 → 退回 CPU(OpenVINO)，但明確告知(非靜默回退)。
+            # Windows ARM 沒有 OpenVINO 可退，直接回報錯誤。
+            if backend != "openvino" and not crisp_only():
                 self._emit("progress", {"pct": 0, "status": f"{backend} 載入失敗，改用 CPU 核心…"})
                 try:
                     self._load_openvino()
@@ -642,6 +670,8 @@ class WebBackend:
         return False
 
     def _persisted_backend(self) -> str:
+        if crisp_only():
+            return "crispasr"
         try:
             f = getattr(core, "SETTINGS_FILE", BASE_DIR / "settings.json")
             if Path(f).exists():
@@ -770,25 +800,124 @@ class WebBackend:
         segments = _rich_to_segments(rich) if rich else parse_srt_to_segments(srt)
         saved = str(srt)
         out_fmt = (self._settings_raw().get("output_format", "srt") or "srt").lower()
-        if out_fmt == "txt":
-            try:
-                from subtitle_lines import write_transcript
-                lines = [(seg["start"], seg["end"], seg["text"],
-                          (f'說話者{seg["speaker"]}' if seg.get("speaker") else None))
-                         for seg in segments]
-                txt = write_transcript(Path(srt), lines, out_format="txt")
-                try:
+        out_fmt = "txt" if out_fmt == "txt" else "srt"
+
+        # ── 翻譯（選用）：時間軸不動，每段多一個 translation 欄位 ──
+        tr_info = self._translate_segments(segments, opts, progress_cb)
+        translated = bool(tr_info and tr_info.get("ok"))
+        keep = self._translate_keep(opts)
+
+        def _lines(translated_text: bool):
+            # 譯文字幕：跨行句子的接續行併成一格（見 translator.merge_translated）
+            if translated_text:
+                from translator import merge_translated
+                cells = merge_translated(segments)
+            else:
+                cells = segments
+            return [(c["start"], c["end"], c["text"],
+                     (f'說話者{c["speaker"]}' if c.get("speaker") else None))
+                    for c in cells]
+
+        try:
+            from subtitle_lines import write_transcript
+            only = translated and keep == "only"
+            if out_fmt == "txt" or only:
+                # 主檔要重寫：純文字格式，或「只保留譯文」時以譯文取代原文
+                main = write_transcript(Path(srt), _lines(only), out_format=out_fmt)
+                if Path(main) != Path(srt):
                     Path(srt).unlink(missing_ok=True)
-                except Exception:
-                    pass
-                saved = str(txt)
-            except Exception:
-                traceback.print_exc()          # 退回 SRT，不讓轉錄整體失敗
+                saved = str(main)
+            if translated and keep == "both":
+                # 兩份都留：原文是主檔，譯文另存成「檔名.語言.srt」
+                from translator import lang_tag
+                ref = Path(srt).with_name(f"{Path(srt).stem}.{lang_tag(tr_info['target'])}.srt")
+                tr_info["path"] = str(write_transcript(ref, _lines(True),
+                                                       out_format=out_fmt))
+            elif only:
+                tr_info["path"] = saved
+        except Exception:
+            traceback.print_exc()          # 退回引擎寫好的 SRT，不讓轉錄整體失敗
 
         stats = self._speed_stats(_audio_sec, _elapsed)
         if progress_cb:
             progress_cb(100, "完成")
-        return {"segments": segments, "srtPath": saved, "stats": stats}
+        res = {"segments": segments, "srtPath": saved, "stats": stats}
+        if tr_info:
+            res["translation"] = tr_info
+        return res
+
+    # ── 翻譯（translator.py）────────────────────────────────
+    def _translate_keep(self, opts: dict) -> str:
+        """有譯文時要留哪些字幕：both（原文＋譯文兩份，預設）／only（只留譯文）。"""
+        v = opts.get("translateKeep") or self._settings_raw().get("translate_keep")
+        return "only" if v == "only" else "both"
+
+    def _translate_segments(self, segments: list, opts: dict, progress_cb=None):
+        """依 opts["translate"] 翻譯 segments（就地寫入 seg["translation"]）。
+
+        跨行的句子整句翻一次：那幾行共用同一筆譯文，第一行以外另標
+        seg["trCont"]=True（寫譯文字幕時併成一格，前端字幕卡只顯示一次）。
+
+        回傳 None（沒要求翻譯）或 {"target", "ok", "skipped"?, "error"?}。
+        翻譯失敗不會讓轉錄失敗：原文字幕照樣回傳，錯誤放在 error 給前端顯示。
+        """
+        from translator import (TARGETS, TranslatorServer, detect_language,
+                                normalize_target, translate_segments)
+        target = normalize_target(opts.get("translate"))
+        if not target or not segments:
+            return None
+        info = {"target": target, "ok": False}
+        if detect_language([s["text"] for s in segments]) == target:
+            info["skipped"] = f"內容已經是{TARGETS[target][2]}，略過翻譯"
+            return info
+
+        def _say(msg):
+            if progress_cb:
+                progress_cb(99, msg)
+
+        try:
+            from downloader import (quick_check_crispasr, download_crispasr_core,
+                                    crispasr_gpu_backend, quick_check_translator,
+                                    download_translator, translator_paths)
+            crispasr_dir = self._crispasr_dir()
+            variant = self._crisp_variant()
+            if not quick_check_crispasr(crispasr_dir, variant):
+                _say("下載 CrispASR 核心（翻譯用）…")
+                download_crispasr_core(crispasr_dir, progress_cb=self._dl_progress,
+                                       variant=variant)
+            model_dir = self._model_dir()
+            if not quick_check_translator(model_dir):
+                _say("下載翻譯模型（約 850 MB）…")
+                download_translator(model_dir, progress_cb=self._dl_progress)
+            model, stub = translator_paths(model_dir)
+            gpu = crispasr_gpu_backend(variant)
+            # chatllm 的 DLL 在本程序內握著 Vulkan context；再開一個用 Vulkan 的
+            # 子程序曾造成顯示驅動重置（見 vulkan-dual-context-crash）→ 改用 CPU。
+            if getattr(self, "_active_backend", "") == "chatllm":
+                gpu = None
+            _say("載入翻譯模型…")
+            total = len(segments)
+
+            def _prog(done, _total):
+                if done == total or done % 10 == 0:
+                    _say(f"翻譯中 {done}/{total}")
+
+            with TranslatorServer(crispasr_dir / "crispasr.exe", model, stub,
+                                  gpu_backend=gpu,
+                                  device_id=self._vk_device_id(self._settings_raw())) as srv:
+                trs, cont = translate_segments(srv, segments, target, progress_cb=_prog,
+                                               cancel=lambda: self._cancel)
+            for seg, tr, is_cont in zip(segments, trs, cont):
+                seg["translation"] = tr
+                if is_cont:                 # 與上一行同一句，共用同一筆譯文
+                    seg["trCont"] = True
+            if not any(trs):
+                raise RuntimeError("翻譯模型沒有回傳任何內容")
+            info["ok"] = True
+        except Exception as e:
+            traceback.print_exc()
+            info["error"] = (str(e).splitlines()[0][:200] if str(e) else type(e).__name__)
+        return info
 
     @staticmethod
     def _audio_seconds(path) -> float:
@@ -957,6 +1086,16 @@ class WebBackend:
         v = s.get("crisp_variant")
         if v in crispasr_variants():
             return v
+        # 還沒選過，但核心資料夾裡已經有一份對得上版本的核心（例如 RTX Spark
+        # 專用包是連核心一起附的）→ 直接沿用它，不要因為偵測結果不同又重抓一份。
+        try:
+            from downloader import installed_crispasr_info, _CRISPASR_VERSION
+            inst = installed_crispasr_info(self._crispasr_dir())
+            if inst["version"] == _CRISPASR_VERSION and inst["variant"] in crispasr_variants():
+                self._persist_setting("crisp_variant", inst["variant"])
+                return inst["variant"]
+        except Exception:
+            pass
         try:
             v = recommend_crispasr_variant()["recommended"]
         except Exception:
@@ -1098,6 +1237,9 @@ class WebBackend:
     def set_backend(self, idx) -> dict:
         backend = self._BACKENDS.get(int(idx) if str(idx).isdigit() else 0, "openvino")
         label = self._backend_label(backend)
+        if crisp_only() and backend != "crispasr":
+            return {"ok": False, "backend": "crispasr", "restartRequired": False,
+                    "message": _ARM_ONLY_NOTE}
         self._persist_backend(backend)
         active = getattr(self, "_active_backend", "openvino")
         if backend == active:
@@ -1175,6 +1317,8 @@ class WebBackend:
         ② 目前已記住的 backend 就是 chatllm（曾選用過）。新安裝的乾淨機器兩者皆否
         → chatllm 不出現在模型清單／自檢，UI 維持以 CASR-Qwen 為主。
         """
+        if crisp_only():
+            return False                 # Windows ARM：不提供（見 crisp_only）
         try:
             if self._persisted_backend() == "chatllm":
                 return True
@@ -1245,10 +1389,16 @@ class WebBackend:
         vmeta = crispasr_variants().get(variant, {})
 
         profiles = []
+        arm = crisp_only()
         for p in _BASIC_PROFILES:
             core_label, model_label = p["picks"].get(tier, p["picks"]["igpu"])
             entry = next((e for e in _MODEL_CATALOG
                           if e[0] == core_label and e[1] == model_label), None)
+            if arm and entry is not None and entry[2] != "crispasr":
+                # 純 CPU 的建議是 OpenVINO；Windows ARM 不提供 → 改給內顯那一檔（CrispASR）
+                core_label, model_label = p["picks"]["igpu"]
+                entry = next((e for e in _MODEL_CATALOG
+                              if e[0] == core_label and e[1] == model_label), None)
             if entry is None:            # 目錄改名時不要整頁壞掉，跳過該用途
                 continue
             _, _, be, patch = entry
@@ -1278,8 +1428,11 @@ class WebBackend:
         cur_core, cur_model = self._current_selection()
         show_chatllm = self._chatllm_available()
         order, by_core = [], {}
+        arm = crisp_only()
         for core_label, model_label, be, _patch in _MODEL_CATALOG:
             if be == "chatllm" and not show_chatllm:
+                continue
+            if arm and be != "crispasr":
                 continue
             if core_label not in by_core:
                 by_core[core_label] = []
@@ -1304,6 +1457,11 @@ class WebBackend:
             entry = next((e for e in _MODEL_CATALOG if e[0] == core_label),
                          _MODEL_CATALOG[0])
         core_label, model_label, backend, patch = entry
+        if crisp_only() and backend != "crispasr":
+            return {"ok": False, "core": core_label, "model": model_label,
+                    "backend": backend, "arch": self._backend_label(backend, backend),
+                    "restartRequired": False, "canLoadNow": False,
+                    "note": "", "message": _ARM_ONLY_NOTE}
 
         f = Path(getattr(core, "SETTINGS_FILE", BASE_DIR / "settings.json"))
         try:
@@ -1473,12 +1631,12 @@ class WebBackend:
                  "已下載", "未下載（啟用分離時自動下載）"),
         ]
 
-        cores = [ov, crisp]
+        cores = [crisp] if crisp_only() else [ov, crisp]
 
         # chatllm（向下相容）：僅在 _chatllm_available 時列出，讓既有使用者能確認
         # 其載入狀況。核心 DLL「不隨安裝包提供」→ 缺則紅燈（非可自動下載）；
         # .bin 模型缺則黃燈（啟用時自動下載）。FA／diar 與 OpenVINO 共用。
-        if self._chatllm_available():
+        if self._chatllm_available() and not crisp_only():
             chatllm_dir = self._chatllm_dir()
             dll_ok = (chatllm_dir / "libchatllm.dll").exists()
             bin_candidates = [
@@ -1546,6 +1704,10 @@ class WebBackend:
             "chunkSecs": int(s.get("chunk_secs", 0) or 0),   # 0=自動（依模型上限）
             # 英文／韓文字幕的單行字數上限（顯示寬度）
             "lineChars": self._line_chars(s.get("line_chars")),
+            # 翻譯：目標語言（""＝不翻譯）與有譯文時保留哪些字幕
+            "translate": (s.get("translate_to") if s.get("translate_to") in ("zh", "en", "ja")
+                          else ""),
+            "translateKeep": "only" if s.get("translate_keep") == "only" else "both",
             # 模型頁模式：basic（用途導向，預設）／advanced（核心+模型全手動）
             "modelMode": (s.get("model_mode") if s.get("model_mode") in ("basic", "advanced")
                           else "basic"),
@@ -1569,6 +1731,7 @@ class WebBackend:
                    "mirror": "hf_mirror", "ffmpeg": "ffmpeg_path", "theme": "appearance",
                    "uiLang": "ui_lang", "vad": "vad_threshold", "chunkSecs": "chunk_secs",
                    "vadRoute": "vad_route", "lineChars": "line_chars",
+                   "translate": "translate_to", "translateKeep": "translate_keep",
                    "modelMode": "model_mode"}
         for k, v in patch.items():
             if k in key_map:

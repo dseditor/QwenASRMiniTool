@@ -866,7 +866,8 @@ class ChatLLMASREngine:
 
         # OpenCC 簡→繁轉換（模型預設輸出簡體中文；簡體模式則跳過）
         if self.cc and text and not _output_simplified:
-            text = self.cc.convert(text)
+            from subtitle_lines import to_traditional
+            text = to_traditional(self.cc, text)
 
         return text
 
@@ -1066,9 +1067,8 @@ class ChatLLMASREngine:
                 if spaced is not None:
                     est = [(s, e, line) for (s, e, line, _sp, _w) in spaced]
                 else:
-                    text = raw_text
-                    if self.cc and not _output_simplified:
-                        text = self.cc.convert(raw_text)
+                    from subtitle_lines import to_traditional
+                    text = to_traditional(self.cc, raw_text, _output_simplified)
                     est = _assign_ts(_split_to_lines(text), g0, g1)
                 for s, e, line in est:
                     all_subs.append((s, e, line, spk))

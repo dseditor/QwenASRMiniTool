@@ -122,6 +122,12 @@ def _pick_asset(assets: list[dict]) -> tuple[str, str] | None:
 
     回傳 (asset_name, download_url)，找不到則 None。
     """
+    # 同一個 Release 可能放了不只一種套件（例如另一種硬體的專用版）。先只看
+    # 「檔名開頭就是本程式」的套件，免得把別種版本覆蓋到這份安裝上；一個都對
+    # 不上才退回舊行為（交給 is_migration_package 判斷）。
+    mine = [a for a in assets
+            if package_app_name(a.get("name", "")).lower() == Path(exe_name()).stem.lower()]
+    assets = mine or assets
     zips = [a for a in assets if a.get("name", "").lower().endswith(".zip")]
     if zips:
         return zips[0]["name"], zips[0]["browser_download_url"]

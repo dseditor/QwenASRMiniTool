@@ -37,7 +37,8 @@ import numpy as np
 
 # 與 Qwen 路徑統一的字幕分行（字級時間軸 → 字幕行，全引擎共用）
 from subtitle_lines import (_ts_chatllm_to_subtitle_lines, _srt_ts, write_transcript,
-                            _ZH_CLAUSE_END, _EN_SENT_END, is_spaced_script)
+                            _ZH_CLAUSE_END, _EN_SENT_END, is_spaced_script,
+                            to_traditional)
 
 # 中文/英文標點集合（與斷句器一致）：Qwen 模式下標點只當切點、不進 items
 _PUNCT = _ZH_CLAUSE_END | _EN_SENT_END
@@ -683,11 +684,15 @@ class CrispWhisperEngine:
             # Whisper＋Silero：VAD 把時間軸映回原音檔時，跨越靜音的那個字會被拉長
             # 成整段靜音的長度（實測單字 96 秒）。收回到貼著鄰字的正常長度。
             ts_items = _clamp_stretched(ts_items)
+        if is_qwen and not no_fa and not spaced:
+            # CrispASR 0.8.54 起對齊器把標點黏在前一個字後面（`中、`、`呢。`），不再
+            # 是獨立的一段。中文／日文的分行契約是「項目不帶標點」，在這裡剝掉。
+            ts_items = _strip_item_punct(ts_items)
 
         # 日語：跳過 OpenCC 繁化。s2twp/s2t 是「簡體中文→繁體中文」轉換，套在日文上
         # 會把日文漢字（会/静/図/学）誤轉成繁中字形（會/靜/圖/學），對日語讀者是錯的
-        # （ja-anime 模型本就針對日語，尤其該保留原生字形）。中文/台語維持繁化不變；
-        # 自動偵測無法預知語言，保守仍走繁化。
+        # （ja-anime 模型本就針對日語，尤其該保留原生字形）。中文/台語維持繁化不變。
+        # 語言是「自動」時由共用分行器依內容判斷（subtitle_lines.looks_japanese）。
         cc_use = None if _LANG_MAP.get(language) == "ja" else self.cc
 
         self._last_segments_rich = None   # 本次字級結果（卡拉OK側通道）
@@ -763,9 +768,9 @@ class CrispWhisperEngine:
             txt = out_base.with_suffix(".txt")
             text = txt.read_text(encoding="utf-8", errors="replace").strip() if txt.exists() else ""
         # 日語跳過繁化（同 process_file 理由）；中文/台語維持 s2twp/s2t。
-        if _output_simplified or _LANG_MAP.get(language) == "ja" or self.cc is None:
+        if _LANG_MAP.get(language) == "ja":
             return text
-        return self.cc.convert(text)
+        return to_traditional(self.cc, text, _output_simplified)
 
 
 # ── SRT 解析 / 寫入（模組層工具）──────────────────────────────────────
@@ -848,6 +853,22 @@ def _interpolate_words(items: list[tuple[str, float, float]]
         for u in units:
             out.append((u, s + step * pos, s + step * (pos + len(u))))
             pos += len(u)
+    return out
+
+
+def _strip_item_punct(items: list[tuple[str, float, float]]
+                      ) -> list[tuple[str, float, float]]:
+    """剝掉字級項目頭尾的標點（`中、`→`中`）；只剩標點的項目整個丟掉。
+
+    標點仍留在 raw_text 裡當切點，這裡只是讓項目回到「不帶標點」的契約。
+    項目中間的標點（`3.5`）不動。
+    """
+    strip = "".join(_PUNCT)
+    out: list[tuple[str, float, float]] = []
+    for text, s, e in items:
+        core = text.strip(strip)
+        if core:
+            out.append((core, s, e))
     return out
 
 

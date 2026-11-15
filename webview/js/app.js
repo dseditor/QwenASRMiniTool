@@ -122,9 +122,12 @@
         nSpeakers: $("#sel-spk").value,
         align: $("#sw-align").checked,
         hint: $("#hint-box").value.trim(),
+        translate: $("#sel-translate").value, translateKeep: _trKeep,
       });
+      curTranslation = (res.translation && res.translation.ok) ? res.translation : null;
       renderResult(res.segments);
       logLine("✓ 完成，共 " + res.segments.length + " 段" + speedText(res.stats) + (res.srtPath ? "，已輸出 " + res.srtPath : ""));
+      logTranslation(res.translation);
       $("#btn-open-dir").disabled = false;
       $("#btn-save-sub").disabled = false;
     } catch (err) {
@@ -162,6 +165,16 @@
   //   隨播放高亮，皆可點選 seek —— 肉眼即可看字幕與音訊的對齊準確度。
   const WAVE_N = 200;
   let audioEl = null, audioUrl = null, waveDur = 0, curSegs = [];
+  // 翻譯：curTranslation＝本次結果的翻譯資訊（{target, path}；沒翻譯為 null）；
+  // _trKeep＝設定頁「翻譯後保留的字幕」（both／only）。
+  let curTranslation = null, _trKeep = "both";
+  const TR_TAG = { zh: "zh-TW", en: "en", ja: "ja" };
+  function logTranslation(tr) {
+    if (!tr) return;
+    if (tr.ok) logLine("✓ 已翻譯" + (tr.path ? "，譯文輸出 " + tr.path : ""));
+    else if (tr.skipped) logLine("・" + tr.skipped);
+    else if (tr.error) logLine("✕ 翻譯失敗（原文字幕不受影響）：" + tr.error);
+  }
 
   async function renderResult(segments) {
     $("#result").hidden = false;
@@ -261,7 +274,7 @@
     el.dataset.seg = idx;
     const spk = s.speaker ? `<span class="chip spk-${((s.speaker - 1) % 3) + 1}">說話者 ${s.speaker}</span>` : "";
     el.innerHTML = `<span class="tc">${fmtClock(s.start)} → ${fmtClock(s.end)}</span>
-      <div class="body"><div class="spk">${spk}</div><div class="txt">${escapeHtml(s.text)}</div></div>
+      <div class="body"><div class="spk">${spk}</div><div class="txt">${escapeHtml(s.text)}</div>${s.translation && !s.trCont ? `<div class="tr">${escapeHtml(s.translation)}</div>` : ""}</div>
       <button class="sub-edit" title="編輯此行" aria-label="編輯此行">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
       </button>`;
@@ -431,6 +444,9 @@
         const sp = document.createElement("span"); sp.className = "kara-char space"; line.appendChild(sp);
       }
     });
+    // 對照：逐字高亮的是原文，譯文整行顯示在下方（譯文沒有字級時間）
+    const trEl = $("#kara-trans");
+    if (trEl) { trEl.textContent = seg.translation || ""; trEl.hidden = !seg.translation; }
     const next = curSegs[idx + 1];
     $("#kara-next").textContent = next ? next.text : "";
     return { words, spans };
@@ -499,15 +515,31 @@
     if (!curSegs.length) return;
     let fmt = "srt";
     try { fmt = (await API.getSettings()).format || "srt"; } catch (e) {}
-    const text = fmt === "txt" ? buildTxt(curSegs) : buildSrt(curSegs);
     const base = (picked && picked.name) ? picked.name.replace(/\.[^.]+$/, "") : "字幕";
-    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = base + (fmt === "txt" ? ".txt" : ".srt");
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-    logLine("✓ 已存檔字幕：" + a.download);
+    const ext = fmt === "txt" ? ".txt" : ".srt";
+    const build = segs => (fmt === "txt" ? buildTxt(segs) : buildSrt(segs));
+    function download(text, name) {
+      const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      logLine("✓ 已存檔字幕：" + name);
+    }
+    // 有譯文：依「翻譯後保留的字幕」存原文＋譯文兩份，或只存譯文（沒譯出的行保留原文）
+    const hasTr = curTranslation && curSegs.some(s => s.translation);
+    if (!hasTr || _trKeep !== "only") download(build(curSegs), base + ext);
+    if (hasTr) {
+      // 跨行句子的幾行共用一筆譯文（trCont＝接續行）→ 併成一格，時間涵蓋整句
+      const trSegs = [];
+      curSegs.forEach(s => {
+        if (s.trCont && trSegs.length) trSegs[trSegs.length - 1].end = s.end;
+        else trSegs.push(Object.assign({}, s, { text: s.translation || s.text }));
+      });
+      const tag = _trKeep === "only" ? "" : "." + (TR_TAG[curTranslation.target] || "tr");
+      download(build(trSegs), base + tag + ext);
+    }
   }
   $("#btn-save-sub").addEventListener("click", saveSubtitle);
 
@@ -615,9 +647,11 @@
           file: it.file, language: $("#sel-lang").value || null,
           diarize: $("#sw-batch-diar").checked, nSpeakers: $("#sel-batch-spk").value,
           align: $("#sw-align").checked, hint: "",
+          translate: $("#sel-translate").value, translateKeep: _trKeep,
         });
         it.status = "done"; it.progress = 1; it.srtPath = res.srtPath;
         logLine("✓ " + it.name + "：共 " + (res.segments || []).length + " 段" + speedText(res.stats));
+        logTranslation(res.translation);
       } catch (err) {
         it.status = "failed"; it.progress = 0;
         it.error = (err.message || String(err)).replace(/^⚠\s*/, "");
@@ -1056,6 +1090,10 @@
     if ($("#set-chunk")) { $("#set-chunk").value = cs; $("#set-chunk-val").textContent = cs + "s"; }
     const lc = (+s.lineChars > 0) ? +s.lineChars : 42;
     if ($("#set-line-chars")) { $("#set-line-chars").value = lc; $("#set-line-chars-val").textContent = lc; }
+    // 翻譯：目標語言（音檔辨識頁的選單）與保留方式
+    if ($("#sel-translate")) $("#sel-translate").value = s.translate || "";
+    _trKeep = s.translateKeep === "only" ? "only" : "both";
+    segSet("#set-translate-keep", _trKeep);
     // 介面語言：選單回填 + 套用 i18n（含目前視圖標題）
     const uiLang = s.uiLang || "繁體中文";
     if ([...$("#set-lang").options].some(o => o.value === uiLang)) $("#set-lang").value = uiLang;
@@ -1080,15 +1118,17 @@
   });
   // segmented 控制：點擊切換 + 回寫設定
   [["#set-format", "format"], ["#set-vocab", "vocab"], ["#set-theme", "theme"],
-   ["#set-vad-route", "vadRoute"]].forEach(([sel, key]) => {
+   ["#set-vad-route", "vadRoute"], ["#set-translate-keep", "translateKeep"]].forEach(([sel, key]) => {
     $(sel).addEventListener("click", e => {
       const b = e.target.closest("button"); if (!b) return;
       $$(sel + " button").forEach(x => x.classList.toggle("on", x === b));
       API.setSettings({ [key]: b.dataset.v });
       if (key === "theme") applyTheme(b.dataset.v);
+      if (key === "translateKeep") _trKeep = b.dataset.v;
     });
   });
   $("#set-mirror").addEventListener("change", e => API.setSettings({ mirror: e.target.value.trim() }));
+  $("#sel-translate") && $("#sel-translate").addEventListener("change", e => API.setSettings({ translate: e.target.value }));
   // 外觀主題：淺/深/跟隨系統。system 解析成實際 light/dark 掛到 <html>，並監聽 OS 變化。
   // 視窗標題列深淺由後端（app_webview）依同一設定同步，故只需把偏好寫回 setSettings。
   let _mqHandler = null;

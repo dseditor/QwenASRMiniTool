@@ -326,6 +326,8 @@ _CRISPASR_VERSION  = "0.8.54"
 _CRISPASR_REL_BASE = ("https://github.com/CrispStrobe/CrispASR/releases/"
                       f"download/v{_CRISPASR_VERSION}")
 
+_SPARK_SIZE_MB = 190   # Spark 專用包的下載大小（含 CUDA 13 與 VC 執行階段）
+
 # variant → 中繼資料。gpu_backend 直接餵給 crispasr.exe 的 `--gpu-backend`
 # （None＝不給 GPU 後端、改掛 `-ng` 純 CPU 推理）。
 _CRISPASR_VARIANTS: dict[str, dict] = {
@@ -355,6 +357,24 @@ _CRISPASR_VARIANTS: dict[str, dict] = {
         "gpu_backend": "cuda",
         "desc":        "同 CUDA 12 但用較新的 runtime，體積小一些；需要 580 以上"
                        "的 NVIDIA 驅動。",
+    },
+    # RTX Spark（Windows on ARM＋NVIDIA）專用。CrispASR 官方沒有出 Windows ARM64
+    # 的 CUDA 版，這一包是我們自己在 Spark 上用同一份原始碼（同版號的 tag）原生
+    # 編譯的，功能與官方版完全相同，只有核心不同。CUDA 13 的 runtime DLL 一併
+    # 打包在裡面——Windows ARM 的 CUDA 元件使用者無從另外取得。
+    # 來源是本專案自己的 GitHub Release（"url" 覆寫官方的下載位置）。
+    "cuda-spark": {
+        "zip":         "crispasr-windows-arm64-cuda13-spark.zip",
+        "url":         ("https://github.com/dseditor/QwenASRMiniTool/releases/download/"
+                        f"crispasr-spark-v{_CRISPASR_VERSION}/"
+                        "crispasr-windows-arm64-cuda13-spark.zip"),
+        "label":       "CUDA · RTX Spark 專用（Windows ARM）",
+        "short":       "CUDA（Spark）",
+        "size_mb":     _SPARK_SIZE_MB,
+        "gpu_backend": "cuda",
+        "arch":        "arm64",
+        "desc":        "RTX Spark 專用的原生 ARM64 編譯版，自帶 CUDA 13 元件。"
+                       "只能在 Windows ARM 的 NVIDIA 機器上執行。",
     },
     "cpu": {
         "zip":         "crispasr-windows-x86_64-cpu.zip",
@@ -417,6 +437,35 @@ def _run_hidden(cmd: list[str], timeout: int = 12) -> str:
         return ""
 
 
+def host_arch() -> str:
+    """這台機器「真正的」處理器架構：`arm64` 或 `x86_64`。
+
+    本程式是 x64 執行檔，在 Windows on ARM 上是被模擬執行的；此時
+    `platform.machine()` 與 `PROCESSOR_ARCHITECTURE` 都會回報 AMD64（系統刻意
+    對被模擬的程式隱瞞）。要問 `IsWow64Process2` 才拿得到原生架構。
+    """
+    if _sys.platform != "win32":
+        import platform
+        return "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x86_64"
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        k32.GetCurrentProcess.restype = ctypes.c_void_p
+        k32.IsWow64Process2.argtypes = [ctypes.c_void_p,
+                                        ctypes.POINTER(ctypes.c_ushort),
+                                        ctypes.POINTER(ctypes.c_ushort)]
+        proc, native = ctypes.c_ushort(0), ctypes.c_ushort(0)
+        if k32.IsWow64Process2(k32.GetCurrentProcess(),
+                               ctypes.byref(proc), ctypes.byref(native)):
+            return "arm64" if native.value == 0xAA64 else "x86_64"   # IMAGE_FILE_MACHINE_ARM64
+    except Exception:
+        pass
+    import os
+    env = (os.environ.get("PROCESSOR_ARCHITEW6432")
+           or os.environ.get("PROCESSOR_ARCHITECTURE") or "").upper()
+    return "arm64" if env == "ARM64" else "x86_64"
+
+
 def _vendor_of(name: str, compat: str) -> str:
     """由顯卡名稱／廠商字串判斷 vendor 代號。"""
     s = f"{compat} {name}".lower()
@@ -439,10 +488,11 @@ def detect_hardware() -> dict:
        "vendors": ["nvidia","intel"],                        # 去重後的廠商清單
        "nvidia_driver": 581.15 | None,                       # 主版號.次版號
        "has_discrete": bool,
+       "arch": "x86_64" | "arm64",                           # 主機的原生架構
        "error": str | None}
     """
     info = {"gpus": [], "vendors": [], "nvidia_driver": None,
-            "has_discrete": False, "error": None}
+            "has_discrete": False, "arch": host_arch(), "error": None}
     if _sys.platform != "win32":
         info["error"] = "目前僅支援 Windows 的硬體偵測"
         return info
@@ -521,14 +571,26 @@ def recommend_crispasr_variant(hw: dict | None = None) -> dict:
     vendors = hw.get("vendors", [])
     drv     = hw.get("nvidia_driver")
     has_nv  = "nvidia" in vendors
+    is_arm  = hw.get("arch") == "arm64"
 
     # NVIDIA 使用者可選的 CUDA 版本：驅動夠新才給 13，否則 12。
+    # Windows ARM 上 x64 的 CUDA 版用不了（x64 的 CUDA DLL 接不上 ARM64 的驅動），
+    # 唯一的 CUDA 選項是 Spark 專用編譯版。
     cuda_key = None
-    if has_nv:
+    if has_nv and is_arm:
+        cuda_key = "cuda-spark"
+    elif has_nv:
         cuda_key = "cuda13" if (drv is None or drv >= _CUDA13_MIN_DRIVER) else "cuda12"
 
     recommended = _CRISPASR_DEFAULT_VARIANT       # 一律以 Vulkan 為預設
-    if not hw.get("gpus"):
+    if is_arm and has_nv:
+        # ARM 機器沒有「先用小的 Vulkan 版」這個選項：x64 的 Vulkan 版要經過模擬、
+        # 沒有驗證過；原生的就只有這一包。
+        recommended = "cuda-spark"
+        names = "、".join(g["name"] for g in hw["gpus"] if g["vendor"] == "nvidia")
+        reason = (f"偵測到 Windows ARM 的 NVIDIA 裝置（{names}）。使用 RTX Spark 專用的"
+                  f"原生 ARM64 CUDA 版；其他版本是 x64 編譯，在這台機器上要經過模擬執行。")
+    elif not hw.get("gpus"):
         reason = ("未偵測到顯示卡資訊，先以 Vulkan 版為預設——它在沒有獨立顯卡時"
                   "會自動退回 CPU 推理，最不會出事。")
     elif has_nv:
@@ -548,8 +610,15 @@ def recommend_crispasr_variant(hw: dict | None = None) -> dict:
     options = []
     for key, meta in _CRISPASR_VARIANTS.items():
         suitable, note = True, ""
-        if key in ("cuda12", "cuda13"):
-            if not has_nv:
+        if key == "cuda-spark":
+            if not is_arm:
+                suitable, note = False, "只能在 Windows ARM（RTX Spark）上執行"
+            elif not has_nv:
+                suitable, note = False, "需要 NVIDIA 顯示晶片"
+        elif key in ("cuda12", "cuda13"):
+            if is_arm:
+                suitable, note = False, "x64 的 CUDA 版無法在 Windows ARM 上使用"
+            elif not has_nv:
                 suitable, note = False, "需要 NVIDIA 顯示卡"
             elif key == "cuda13" and drv is not None and drv < _CUDA13_MIN_DRIVER:
                 suitable, note = False, (f"需要 {_CUDA13_MIN_DRIVER:.0f} 以上的驅動"
@@ -558,6 +627,8 @@ def recommend_crispasr_variant(hw: dict | None = None) -> dict:
                 note = "驅動版本建議改用另一個 CUDA 版本"
         elif key == "cpu-legacy":
             note = "只有在一般 CPU 版閃退時才需要"
+        elif is_arm:
+            note = "x64 編譯，在 Windows ARM 上以模擬方式執行（未驗證）"
         options.append({"key": key, "label": meta["label"],
                         "size_mb": meta["size_mb"], "desc": meta["desc"],
                         "recommended": key == recommended,
@@ -639,7 +710,8 @@ def download_crispasr_core(crispasr_dir: Path, progress_cb=None,
 
     variant = variant if variant in _CRISPASR_VARIANTS else _CRISPASR_DEFAULT_VARIANT
     meta    = _CRISPASR_VARIANTS[variant]
-    url     = f"{_CRISPASR_REL_BASE}/{meta['zip']}"
+    # 官方版都在 CrispASR 的 release；自編版（Spark）用各自的 "url"
+    url     = meta.get("url") or f"{_CRISPASR_REL_BASE}/{meta['zip']}"
 
     crispasr_dir = Path(crispasr_dir)
     crispasr_dir.mkdir(parents=True, exist_ok=True)
@@ -1073,6 +1145,70 @@ def download_qwen3_asr_ja_gguf(model_dir: Path,
 # ══════════════════════════════════════════════════════════════════════
 # 完整性檢查
 # ══════════════════════════════════════════════════════════════════════
+
+# ── 字幕翻譯模型（LinguaForge，Qwen3.5-0.8B 微調，繁中↔英↔日）──────────
+# 由 crispasr.exe --server --chat-model 載入（見 translator.py）。Apache-2.0。
+# 另需一顆「佔位」語音模型：crispasr 的 server 模式一定要有辨識模型，不給就會
+# 自己去抓 Whisper base（147 MB，不走我們的鏡像設定）。這裡改給最小的
+# Whisper tiny 量化版（32 MB），它只被載入、不會被用到。
+_TRANSLATOR_REPO = "RX5950XT/LinguaForge-Qwen3.5-0.8B-zhTW-en-ja"
+_TRANSLATOR_FILE = "linguaforge-v5e-0.8b-Q8_0.gguf"
+_TRANSLATOR_URL  = (f"https://huggingface.co/{_TRANSLATOR_REPO}/resolve/main/"
+                    f"gguf-v5e/{_TRANSLATOR_FILE}")
+_TRANSLATOR_MIN_BYTES = 800_000_000          # 實際 811,843,008；擋下載到一半的殘檔
+_TR_STUB_FILE = "ggml-tiny-q5_1.bin"
+_TR_STUB_URL  = ("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/"
+                 f"{_TR_STUB_FILE}")
+_TR_STUB_MIN_BYTES = 30_000_000              # 實際 32,152,673
+
+
+def translator_dir(model_dir: Path) -> Path:
+    return Path(model_dir) / "translator"
+
+
+def translator_paths(model_dir: Path) -> tuple[Path, Path]:
+    """回傳 (翻譯模型, 佔位語音模型) 的路徑。"""
+    d = translator_dir(model_dir)
+    return d / _TRANSLATOR_FILE, d / _TR_STUB_FILE
+
+
+def _big_enough(path: Path, min_bytes: int) -> bool:
+    try:
+        return _file_is_real(path) and path.stat().st_size >= min_bytes
+    except OSError:
+        return False
+
+
+def quick_check_translator(model_dir: Path) -> bool:
+    """翻譯模型與佔位模型是否都已完整下載。"""
+    model, stub = translator_paths(model_dir)
+    return (_big_enough(model, _TRANSLATOR_MIN_BYTES)
+            and _big_enough(stub, _TR_STUB_MIN_BYTES))
+
+
+def download_translator(model_dir: Path, progress_cb=None):
+    """下載翻譯模型（約 812 MB）與佔位模型（32 MB）。
+
+    progress_cb(pct: float, msg: str)。支援斷點續傳與 HF 鏡像。
+    """
+    model, stub = translator_paths(model_dir)
+    jobs = [(_TR_STUB_URL, stub, _TR_STUB_MIN_BYTES),
+            (_TRANSLATOR_URL, model, _TRANSLATOR_MIN_BYTES)]
+    for url, dest, min_bytes in jobs:
+        if _big_enough(dest, min_bytes):
+            continue
+
+        def _cb(done: int, total_b: int, _name=dest.name):
+            if progress_cb and total_b > 0:
+                progress_cb(done / total_b,
+                            f"下載 {_name}…  {done/1_048_576:.0f} / {total_b/1_048_576:.0f} MB")
+
+        _download_file(url, dest, progress_cb=_cb)
+        if not _big_enough(dest, min_bytes):
+            raise RuntimeError(f"{dest.name} 下載不完整，請再試一次")
+    if progress_cb:
+        progress_cb(1.0, "✅ 翻譯模型就緒")
+
 
 def _sha256(path: Path, progress_cb=None) -> str:
     h = hashlib.sha256()

@@ -98,7 +98,7 @@
             <option value="auto" data-i18n="common.spkAuto">人數 自動</option>
             <option>2</option><option>3</option><option>4</option><option>5</option><option>6</option>
           </select>
-          <label class="switch"><input type="checkbox" id="sw-align" checked><span class="track"></span><span data-i18n="file.align">時間軸對齊</span></label>
+          <label class="switch"><input type="checkbox" id="sw-align" checked><span class="track"></span><span data-i18n="file.align">時間軸對齊</span><span class="sw-na" id="align-na" data-i18n="file.alignNA" hidden>（此模型不適用）</span></label>
         </div>
 
         <div class="hint-head">
@@ -330,6 +330,8 @@
             <div class="seg" id="set-vad-route"><button class="on" data-v="auto" data-i18n="set.vadRouteAuto">自動</button><button data-v="builtin" data-i18n="set.vadRouteBuiltin">固定視窗</button><button data-v="firered" data-i18n="set.vadRouteFireRed">原生 VAD</button></div></div>
           <div class="row"><div class="label"><div class="t" data-i18n="set.chunk">每段最長秒數（字級對齊）</div><div class="d" data-i18n="set.chunkDesc">調短可減少長段歌詞／語音「段尾字級逐漸跑掉、換段才歸位」的漂移。實際上限依模型自動夾低（0.6B 30s、1.7B 10s）；CrispASR 走自身視窗，不受此設定影響。</div></div>
             <input type="range" class="slider" id="set-chunk" min="5" max="30" step="1" value="30"><span class="slider-val" id="set-chunk-val">30s</span></div>
+          <div class="row"><div class="label"><div class="t" data-i18n="set.lineChars">英文／韓文單行字數上限</div><div class="d" data-i18n="set.lineCharsDesc">英文、韓文等以空白分詞的語言，每行字幕最多幾個字元（韓文一個字算 2）。超過時優先在逗號後換行。預設 42；中文、日文不受此設定影響。</div></div>
+            <input type="range" class="slider" id="set-line-chars" min="24" max="90" step="2" value="42"><span class="slider-val" id="set-line-chars-val">42</span></div>
           <div class="row"><div class="label"><div class="t" data-i18n="set.vocab">簡繁詞彙轉換</div><div class="d" data-i18n="set.vocabDesc">把模型輸出轉成在地用語</div></div>
             <div class="seg" id="set-vocab"><button data-v="off" data-i18n="set.vocabOff">關閉</button><button class="on" data-v="s2twp" data-i18n="set.vocabTW">台灣用語</button><button data-v="s2t" data-i18n="set.vocabStd">標準</button></div></div>
           <div class="row"><div class="label"><div class="t" data-i18n="set.mirror">HuggingFace 鏡像站</div><div class="d" data-i18n="set.mirrorDesc">下載模型較慢時可改用鏡像</div></div>

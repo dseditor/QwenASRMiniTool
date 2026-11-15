@@ -46,6 +46,14 @@
       : (s.loading ? T("status.loading", "載入模型中…") : T("status.needModel", "尚未載入模型"));
     // 版本徽章：純數字版本前綴 v（如 v1.0.9）；已含文字者（如 webview 0.1）原樣顯示
     if (s.version) $("#app-version").textContent = /^\d/.test(s.version) ? "v" + s.version : s.version;
+    // 「時間軸對齊」對目前的模型沒有作用時（Whisper／Breeze、TEA）停用開關並說明原因，
+    // 不讓使用者以為開了就有對齊。不動 checked，換回支援的模型時偏好還在。
+    const sw = $("#sw-align"), lab = sw.closest(".switch");
+    const alignOk = s.alignSupported !== false;
+    sw.disabled = !alignOk;
+    lab.classList.toggle("is-disabled", !alignOk);
+    lab.title = alignOk ? "" : (s.alignNote || "");
+    $("#align-na").hidden = alignOk;
   }
 
   // ════════════════════════════════════════════════════════
@@ -1046,6 +1054,8 @@
     // 每段最長秒數：0/未設 → 視為上限（slider 顯示 30，後端依模型夾低）
     const cs = (+s.chunkSecs > 0) ? +s.chunkSecs : 30;
     if ($("#set-chunk")) { $("#set-chunk").value = cs; $("#set-chunk-val").textContent = cs + "s"; }
+    const lc = (+s.lineChars > 0) ? +s.lineChars : 42;
+    if ($("#set-line-chars")) { $("#set-line-chars").value = lc; $("#set-line-chars-val").textContent = lc; }
     // 介面語言：選單回填 + 套用 i18n（含目前視圖標題）
     const uiLang = s.uiLang || "繁體中文";
     if ([...$("#set-lang").options].some(o => o.value === uiLang)) $("#set-lang").value = uiLang;
@@ -1064,6 +1074,9 @@
   });
   $("#set-chunk") && $("#set-chunk").addEventListener("input", e => {
     const v = +e.target.value; $("#set-chunk-val").textContent = v + "s"; API.setSettings({ chunkSecs: v });
+  });
+  $("#set-line-chars") && $("#set-line-chars").addEventListener("input", e => {
+    const v = +e.target.value; $("#set-line-chars-val").textContent = v; API.setSettings({ lineChars: v });
   });
   // segmented 控制：點擊切換 + 回寫設定
   [["#set-format", "format"], ["#set-vocab", "vocab"], ["#set-theme", "theme"],

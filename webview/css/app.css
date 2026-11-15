@@ -240,6 +240,10 @@ button { font-family: inherit; }
 .switch input:checked + .track { background: var(--accent); }
 .switch input:checked + .track::after { transform: translateX(16px); }
 .switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* 對目前模型沒有作用的開關：變淡、軌道退回未啟用色，旁邊的小字說明原因 */
+.switch.is-disabled { cursor: not-allowed; opacity: .55; }
+.switch.is-disabled input:checked + .track { background: var(--line-strong); }
+.switch .sw-na { font-size: 12px; margin-left: -4px; color: var(--muted); }
 
 /* 分段控制 segmented */
 .seg {

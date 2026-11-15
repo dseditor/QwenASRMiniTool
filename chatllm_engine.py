@@ -1060,11 +1060,17 @@ class ChatLLMASREngine:
 
             if not aligned:
                 # ── 比例估算 Fallback ──────────────────────────────────────
-                text = raw_text
-                if self.cc and not _output_simplified:
-                    text = self.cc.convert(raw_text)
-                lines = _split_to_lines(text)
-                for s, e, line in _assign_ts(lines, g0, g1):
+                # 英文／韓文走共用的空白分詞分行（保留標點、不拆撇號）；其餘照舊。
+                from subtitle_lines import spaced_lines_from_text
+                spaced = spaced_lines_from_text(raw_text, g0, g1, spk)
+                if spaced is not None:
+                    est = [(s, e, line) for (s, e, line, _sp, _w) in spaced]
+                else:
+                    text = raw_text
+                    if self.cc and not _output_simplified:
+                        text = self.cc.convert(raw_text)
+                    est = _assign_ts(_split_to_lines(text), g0, g1)
+                for s, e, line in est:
                     all_subs.append((s, e, line, spk))
                     all_rich.append({"start": s, "end": e, "text": line,
                                      "speaker": spk, "words": []})   # 無對齊 → 前端內插

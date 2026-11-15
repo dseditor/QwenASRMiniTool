@@ -541,9 +541,30 @@ class WebBackend:
         self.engine = eng
 
     # ── 狀態 ────────────────────────────────────────────────
+    def _align_support(self) -> tuple[bool, str]:
+        """「時間軸對齊」開關對目前載入的模型有沒有作用 → (有作用, 沒作用的原因)。
+
+        兩種模型開了也不會生效，介面要如實呈現，不能讓使用者以為有對齊：
+          • Whisper／Breeze：走 crispasr 的 legacy 路徑，`-am -falign` 掛不掛輸出
+            逐位元組相同（見 crisp_engine._vad_plan 的實測）。
+          • TEA：原生輸出繁體，與 CTC 對齊器不相容，載入時就停用了。
+        尚未載入模型時回 True（不知道會載入哪一個，先不擋）。
+        """
+        eng = self.engine
+        if not getattr(eng, "ready", False):
+            return True, ""
+        if getattr(eng, "_backend", "") == "whisper":
+            return False, "Whisper／Breeze 使用模型自帶的時間軸，對齊器對它不會生效。"
+        if getattr(eng, "_fa_blocked", False):
+            return False, "此模型原生輸出繁體，與對齊器不相容，改用模型自帶的時間軸。"
+        return True, ""
+
     def get_status(self) -> dict:
         active = getattr(self, "_active_backend", "openvino")
+        align_ok, align_note = self._align_support()
         return {
+            "alignSupported": align_ok,
+            "alignNote": align_note,
             "modelReady": bool(getattr(self.engine, "ready", False)),
             "loading": self._loading,
             "error": self._load_err,
@@ -1523,6 +1544,8 @@ class WebBackend:
             "vadRoute": (s.get("vad_route") if s.get("vad_route") in _VAD_ROUTES
                          else _VAD_ROUTE_DEFAULT),
             "chunkSecs": int(s.get("chunk_secs", 0) or 0),   # 0=自動（依模型上限）
+            # 英文／韓文字幕的單行字數上限（顯示寬度）
+            "lineChars": self._line_chars(s.get("line_chars")),
             # 模型頁模式：basic（用途導向，預設）／advanced（核心+模型全手動）
             "modelMode": (s.get("model_mode") if s.get("model_mode") in ("basic", "advanced")
                           else "basic"),
@@ -1545,7 +1568,7 @@ class WebBackend:
         key_map = {"scale": "ui_scale", "format": "output_format",
                    "mirror": "hf_mirror", "ffmpeg": "ffmpeg_path", "theme": "appearance",
                    "uiLang": "ui_lang", "vad": "vad_threshold", "chunkSecs": "chunk_secs",
-                   "vadRoute": "vad_route",
+                   "vadRoute": "vad_route", "lineChars": "line_chars",
                    "modelMode": "model_mode"}
         for k, v in patch.items():
             if k in key_map:
@@ -1561,6 +1584,8 @@ class WebBackend:
             self._apply_vad_route(patch["vadRoute"])   # crispasr：下一次轉錄即生效
         if "chunkSecs" in patch:
             self._apply_vad_max_speech(patch["chunkSecs"])
+        if "lineChars" in patch:
+            self._apply_line_chars(patch["lineChars"])
         if "vocab" in patch:
             self._apply_vocab(*self._vocab_to_flags(patch["vocab"]))
         if "mirror" in patch:
@@ -1675,6 +1700,21 @@ class WebBackend:
             return
         eng.vad_model = self._firered_vad_path()   # 缺檔會就地下載；失敗→None
 
+    @staticmethod
+    def _line_chars(value) -> int:
+        """設定值 → 合法的單行字數上限（24～90；空值或不合法 → 預設 42）。"""
+        from subtitle_lines import DEFAULT_SPACED_CHARS
+        try:
+            v = int(value)
+        except (TypeError, ValueError):
+            return DEFAULT_SPACED_CHARS
+        return max(24, min(90, v)) if v > 0 else DEFAULT_SPACED_CHARS
+
+    def _apply_line_chars(self, value):
+        """英文／韓文字幕的單行字數上限 → 分行器模組全域（下一次轉錄生效）。"""
+        import subtitle_lines as _subs
+        _subs.MAX_SPACED_CHARS = self._line_chars(value)
+
     def _apply_vad_max_speech(self, secs):
         """「每段最長秒數」→ crispasr VAD 的 `-vmsd`（0＝引擎預設 30s）。"""
         eng = getattr(self, "engine", None)
@@ -1697,6 +1737,7 @@ class WebBackend:
             # 設定帶進 load()），這裡只負責「引擎已在、設定才變」的情況。
             self._apply_vad_route(self._vad_route())
             self._apply_vad_max_speech(s.get("chunk_secs", 0))
+            self._apply_line_chars(s.get("line_chars"))
         except Exception:
             pass
         vc = s.get("vocab_convert", True)

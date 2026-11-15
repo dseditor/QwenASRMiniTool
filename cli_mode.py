@@ -109,6 +109,14 @@ def _load(be):
     if not getattr(be.engine, "ready", False):
         raise RuntimeError(be._load_err or "模型載入失敗")
     _log(f"[load] 就緒：{be.get_status()['backend']}")
+    # 選定的核心載入失敗時，WebBackend 會退回 CPU(OpenVINO) 並把原因放在
+    # _load_err。圖形介面退回是合理的（使用者看得到訊息、還能繼續用），但 CLI
+    # 的呼叫端是腳本或 Agent：指定了 `--profile ja` 卻悄悄拿到另一個模型的結果，
+    # 比直接失敗更糟。會走到這裡的原因都是真的錯誤（核心或模型下載失敗、
+    # crispasr.exe 被防毒軟體隔離、程式錯誤），不是「這台機器沒有顯示卡」——
+    # 沒有獨顯時 Vulkan 仍會用內顯，CPU 版核心也是正常載入。所以一律當失敗。
+    if be._load_err:
+        raise RuntimeError(be._load_err)
 
 
 # ══════════════════════════════════════════════════════════════════════

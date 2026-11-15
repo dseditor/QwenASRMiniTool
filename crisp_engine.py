@@ -30,13 +30,14 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
 
 # 與 Qwen 路徑統一的字幕分行（字級時間軸 → 字幕行，全引擎共用）
 from subtitle_lines import (_ts_chatllm_to_subtitle_lines, _srt_ts, write_transcript,
-                            _ZH_CLAUSE_END, _EN_SENT_END)
+                            _ZH_CLAUSE_END, _EN_SENT_END, is_spaced_script)
 
 # 中文/英文標點集合（與斷句器一致）：Qwen 模式下標點只當切點、不進 items
 _PUNCT = _ZH_CLAUSE_END | _EN_SENT_END
@@ -591,14 +592,34 @@ class CrispWhisperEngine:
             bufsize=1, creationflags=_CREATE_NO_WINDOW, startupinfo=_STARTUP_INFO,
         )
         pat = re.compile(r"progress\s*=\s*(\d+)\s*%")
+        # crispasr 在印出第一個進度之前要先載入模型、跑完整個檔案的 VAD，這段
+        # 時間沒有任何輸出。實測 2.3 小時的檔案總共 683 秒，前 382 秒進度條都
+        # 停在 0%，看起來就像卡死（GitHub issue #28）。這裡每兩秒回報一次已經
+        # 等了多久，讓使用者知道程式還在跑。
+        started = threading.Event()
+
+        def _heartbeat():
+            t0 = time.monotonic()
+            while not started.wait(2.0) and proc.poll() is None:
+                if progress_cb:
+                    sec = int(time.monotonic() - t0)
+                    try:
+                        progress_cb(0, 100, f"準備中：載入模型、分析語音段落…（已 {sec} 秒，長檔需要幾分鐘）")
+                    except Exception:
+                        pass
+
+        threading.Thread(target=_heartbeat, name="crisp-heartbeat", daemon=True).start()
         try:
             for line in proc.stdout:
                 m = pat.search(line)
+                if m:
+                    started.set()
                 if m and progress_cb:
                     p = int(m.group(1))
                     # 上限 99：留「完成」給寫檔後的最終回報，避免 100% 卻還在寫字幕
                     progress_cb(min(99, p), 100, f"CrispASR 轉錄中… {p}%")
         finally:
+            started.set()
             proc.wait()
         return proc.returncode
 
@@ -646,7 +667,12 @@ class CrispWhisperEngine:
             return None
         # 這次有沒有真的掛對齊器：模型不相容（TEA）、使用者關掉、或缺模型都算沒有。
         no_fa = is_qwen and not (self.use_aligner and self._aligner_path)
-        if no_fa:
+        # 英文／韓文等以空白分詞的語言：共用分行器會改走 spaced_subtitle_lines，
+        # 那條路徑要的是「帶標點的整個詞」，不能再逐字元拆開。
+        spaced = is_qwen and is_spaced_script(ts_items)
+        if no_fa and spaced:
+            ts_items = _interpolate_words(ts_items)
+        elif no_fa:
             # 沒有對齊器時 `-ml 1` 對 qwen3 後端無效，每個 item 會是一整段長文字，
             # 共用分行器便無從斷句（實測整段可達 60 秒）。這裡把長 item 依字元
             # **等時內插**攤成字元級，讓分行器照常做標點切行／MAX_CHARS 保護。
@@ -671,7 +697,7 @@ class CrispWhisperEngine:
         )
         if not lines5:
             return None
-        if no_fa:
+        if no_fa and not spaced:
             lines5 = _fix_leading_punct(lines5)
         lines = [(s, e, t, sp) for (s, e, t, sp, _w) in lines5]
 
@@ -799,6 +825,29 @@ def _clamp_stretched(items: list[tuple[str, float, float]],
             out.append((text, e - keep, e))
         else:
             out.append((text, s, s + keep))
+    return out
+
+
+def _interpolate_words(items: list[tuple[str, float, float]]
+                       ) -> list[tuple[str, float, float]]:
+    """`_interpolate_chars` 的詞級版：只在空白處拆，標點留在詞尾。
+
+    給英文／韓文用。無對齊器時 crispasr 多半已經一項一個詞（此時原樣通過）；
+    偶爾一項是一整段文字，才依各詞字元數等比例分配時間。
+    """
+    out: list[tuple[str, float, float]] = []
+    for text, s, e in items:
+        units = text.split()
+        if len(units) <= 1:
+            if units:
+                out.append((units[0], s, e))
+            continue
+        total = sum(len(u) for u in units)
+        step = (e - s) / total if e > s else 0.0
+        pos = 0
+        for u in units:
+            out.append((u, s + step * pos, s + step * (pos + len(u))))
+            pos += len(u)
     return out
 
 

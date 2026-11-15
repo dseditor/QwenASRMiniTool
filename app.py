@@ -66,7 +66,7 @@ except Exception:
 from subtitle_lines import (
     MAX_CHARS, _ZH_CLAUSE_END, _EN_SENT_END,
     _srt_ts, _merge_orphan_lines, _ts_chatllm_to_subtitle_lines,
-    write_transcript,
+    write_transcript, spaced_lines_from_text,
 )
 import subtitle_lines as _subs
 
@@ -895,9 +895,14 @@ class ASREngine:
 
             if not aligned:
                 # ── 比例估算 Fallback ──────────────────────────────────────
-                text = raw_text if _g_output_simplified else self.cc.convert(raw_text)
-                lines = _split_to_lines(text)
-                for s, e, line in _assign_ts(lines, g0, g1):
+                # 英文／韓文走共用的空白分詞分行（保留標點、不拆撇號）；其餘照舊。
+                spaced = spaced_lines_from_text(raw_text, g0, g1, spk)
+                if spaced is not None:
+                    est = [(s, e, line) for (s, e, line, _sp, _w) in spaced]
+                else:
+                    text = raw_text if _g_output_simplified else self.cc.convert(raw_text)
+                    est = _assign_ts(_split_to_lines(text), g0, g1)
+                for s, e, line in est:
                     all_subs.append((s, e, line, spk))
                     all_rich.append({"start": s, "end": e, "text": line,
                                      "speaker": spk, "words": []})   # 無對齊 → 前端內插
